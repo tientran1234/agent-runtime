@@ -2,7 +2,7 @@
 
 Backlog for this library. One item per pull request. Items are ordered; take the first unchecked one unless it says `blocked`.
 
-- [ ] Prompt caching in `AnthropicProvider`: `cache_control` on the system prompt and the tool list; surface cache read/write tokens on the model span and in `Run.totals`.
+- [x] Prompt caching in `AnthropicProvider`: `cache_control` on the system prompt and the tool list; surface cache read/write tokens on the model span and in `Run.totals`.
 - [ ] `readAgentSSE(response, handlers)` — a small client-side parser for the events `agentSSE` emits, so every UI does not reimplement frame splitting. Export from `agent-runtime/client`.
 - [ ] Opt-in server-side refusal fallbacks in `AnthropicProvider` (`serverFallbacks: true` → beta `server-side-fallback-2026-07-01`, `fallbacks: "default"`), with a test on the request shape.
 - [ ] `strict: true` passthrough on tool specs (schema must carry `additionalProperties: false` + `required`); `defineTool({ strict: true })`.

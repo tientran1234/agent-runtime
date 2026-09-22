@@ -29,6 +29,12 @@ export interface AnthropicProviderOptions {
    * accept `{ type: "adaptive" }` (e.g. Haiku 4.5) or to opt out explicitly.
    */
   thinking?: boolean;
+  /**
+   * Cache the system prompt and the tool list. Off by default: a cache write
+   * costs 1.25× input and only pays for itself when the same prefix is sent
+   * again — true for a tool loop, not for a single call.
+   */
+  cache?: boolean;
 }
 
 export class AnthropicProvider implements ModelProvider {
@@ -38,6 +44,7 @@ export class AnthropicProvider implements ModelProvider {
   private readonly maxTokens: number;
   private readonly effort: Effort | undefined;
   private readonly thinking: boolean;
+  private readonly cache: boolean;
 
   constructor(options: AnthropicProviderOptions = {}) {
     this.client = options.client ?? new Anthropic();
@@ -45,6 +52,7 @@ export class AnthropicProvider implements ModelProvider {
     this.maxTokens = options.maxTokens ?? 16_000;
     this.effort = options.effort;
     this.thinking = options.thinking ?? true;
+    this.cache = options.cache ?? false;
   }
 
   async complete(request: ModelRequest): Promise<ModelResponse> {
@@ -55,9 +63,9 @@ export class AnthropicProvider implements ModelProvider {
         {
           model: this.model,
           max_tokens: this.maxTokens,
-          ...(request.system !== undefined ? { system: request.system } : {}),
+          ...(request.system !== undefined ? { system: toSystem(request.system, this.cache) } : {}),
           messages: toMessageParams(request.messages),
-          ...(request.tools && request.tools.length > 0 ? { tools: toTools(request.tools) } : {}),
+          ...(request.tools && request.tools.length > 0 ? { tools: toTools(request.tools, this.cache) } : {}),
           ...(this.thinking ? { thinking: { type: "adaptive" as const } } : {}),
           ...(this.effort ? { output_config: { effort: this.effort } } : {}),
         },
@@ -96,12 +104,25 @@ export function toMessageParams(messages: readonly ChatMessage[]): Anthropic.Mes
   });
 }
 
-export function toTools(tools: readonly ToolSpec[]): Anthropic.Tool[] {
-  return tools.map((t) => ({
+const EPHEMERAL = { type: "ephemeral" as const };
+
+/**
+ * Tools render before the system prompt, so the breakpoint goes on the last
+ * tool and closes a prefix of its own: editing the system prompt then still
+ * leaves the tool half of the prefix cached.
+ */
+export function toTools(tools: readonly ToolSpec[], cache = false): Anthropic.Tool[] {
+  return tools.map((t, i) => ({
     name: t.name,
     description: t.description,
     input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
+    ...(cache && i === tools.length - 1 ? { cache_control: EPHEMERAL } : {}),
   }));
+}
+
+/** A plain string unless it is being cached — `cache_control` lives on blocks. */
+export function toSystem(system: string, cache = false): string | Anthropic.TextBlockParam[] {
+  return cache ? [{ type: "text", text: system, cache_control: EPHEMERAL }] : system;
 }
 
 export function fromMessage(message: Anthropic.Message): ModelResponse {

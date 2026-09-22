@@ -83,6 +83,14 @@ says who answered.
 `effort` exposed for tuning. Pass `thinking: false` for models that do not
 accept it.
 
+**Prompt caching is opt-in, and breaks the prefix in two places.**
+`new AnthropicProvider({ cache: true })` puts a `cache_control` breakpoint on
+the last tool and a second one on the system prompt — tools render first, so an
+edited system prompt still hits the cached tool list. It stays off by default
+because a cache write costs 1.25× input: it pays for itself across a tool loop,
+not on a single call. Cached tokens are priced apart from plain input and are
+reported on each model span and in `Run.totals.usage`.
+
 ## Layout
 
 ```
@@ -98,7 +106,7 @@ src/
   providers/
     anthropic.ts     the only file importing @anthropic-ai/sdk
     fake.ts          scripted provider + builders for tests
-tests/               32 tests, no network, no API key
+tests/               36 tests, no network, no API key
 ```
 
 ## SSE
