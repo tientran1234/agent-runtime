@@ -6,17 +6,30 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
-    "./anthropic": { "types": "./dist/providers/anthropic.d.ts", "import": "./dist/providers/anthropic.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./anthropic": {
+      "types": "./dist/providers/anthropic.d.ts",
+      "import": "./dist/providers/anthropic.js"
+    }
   },
-  "files": ["dist", "README.md", "LICENSE"],
-  "engines": { "node": ">=20" },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "prepublishOnly": "pnpm build"
+    "prepublishOnly": "pnpm build",
+    "prepare": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.127.0",
@@ -29,5 +42,14 @@
   },
   "packageManager": "pnpm@9.4.0",
   "license": "MIT",
-  "keywords": ["agent", "llm", "tool-calling", "anthropic", "claude", "tracing", "observability", "sse"]
+  "keywords": [
+    "agent",
+    "llm",
+    "tool-calling",
+    "anthropic",
+    "claude",
+    "tracing",
+    "observability",
+    "sse"
+  ]
 }
