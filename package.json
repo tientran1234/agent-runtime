@@ -1,0 +1,33 @@
+{
+  "name": "agent-runtime",
+  "version": "0.1.0",
+  "description": "Provider-agnostic agent loop for Node: bounded tool calling with validated inputs, token-budget memory, tracing with cost, fallback chains, SSE. Anthropic adapter on the official SDK; fake provider for offline tests.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "import": "./dist/index.js" },
+    "./anthropic": { "types": "./dist/providers/anthropic.d.ts", "import": "./dist/providers/anthropic.js" }
+  },
+  "files": ["dist", "README.md", "LICENSE"],
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "prepublishOnly": "pnpm build"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.127.0",
+    "zod": "^4.6.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.8"
+  },
+  "packageManager": "pnpm@9.4.0",
+  "license": "MIT",
+  "keywords": ["agent", "llm", "tool-calling", "anthropic", "claude", "tracing", "observability", "sse"]
+}
