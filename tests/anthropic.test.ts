@@ -1,7 +1,25 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it } from "vitest";
-import { fromMessage, toMessageParams, toProviderError, toTools } from "../src/providers/anthropic.js";
+import { AnthropicProvider, fromMessage, toMessageParams, toProviderError, toSystem, toTools } from "../src/providers/anthropic.js";
 import { ProviderError } from "../src/index.js";
+
+/** Enough of the SDK surface for `complete()` to run: capture the params, answer from a canned message. */
+function stubClient(capture: (params: Anthropic.MessageCreateParams) => void): Anthropic {
+  const message = {
+    model: "claude-opus-5",
+    stop_reason: "end_turn",
+    content: [{ type: "text", text: "ok" }],
+    usage: { input_tokens: 1, output_tokens: 1 },
+  } as unknown as Anthropic.Message;
+  return {
+    messages: {
+      stream(params: Anthropic.MessageCreateParams) {
+        capture(params);
+        return { on: () => {}, finalMessage: async () => message };
+      },
+    },
+  } as unknown as Anthropic;
+}
 
 describe("anthropic mapping", () => {
   it("translates neutral messages into SDK params, tool results included", () => {
@@ -17,6 +35,48 @@ describe("anthropic mapping", () => {
   it("translates tool specs", () => {
     const [tool] = toTools([{ name: "f", description: "d", inputSchema: { type: "object", properties: {} } }]);
     expect(tool).toMatchObject({ name: "f", description: "d", input_schema: { type: "object" } });
+  });
+
+  it("leaves the system prompt and the tools uncached by default", () => {
+    expect(toSystem("rules")).toBe("rules");
+    expect(toTools([{ name: "f", description: "d", inputSchema: {} }])[0]).not.toHaveProperty("cache_control");
+  });
+
+  it("breaks the cache on the system prompt and on the LAST tool only", () => {
+    expect(toSystem("rules", true)).toEqual([{ type: "text", text: "rules", cache_control: { type: "ephemeral" } }]);
+    const tools = toTools(
+      [
+        { name: "a", description: "d", inputSchema: {} },
+        { name: "b", description: "d", inputSchema: {} },
+      ],
+      true,
+    );
+    expect(tools.map((t) => t.cache_control)).toEqual([undefined, { type: "ephemeral" }]);
+  });
+
+  it("sends both breakpoints in one request when cache is on, and none when it is off", async () => {
+    const send = async (cache: boolean) => {
+      let sent: Anthropic.MessageCreateParams | undefined;
+      const provider = new AnthropicProvider({
+        cache,
+        client: stubClient((params) => (sent = params)),
+        model: "claude-opus-5",
+      });
+      await provider.complete({
+        system: "rules",
+        messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+        tools: [{ name: "f", description: "d", inputSchema: {} }],
+      });
+      return sent!;
+    };
+
+    const cached = await send(true);
+    expect(cached.system).toEqual([{ type: "text", text: "rules", cache_control: { type: "ephemeral" } }]);
+    expect(cached.tools?.[0]).toMatchObject({ cache_control: { type: "ephemeral" } });
+
+    const plain = await send(false);
+    expect(plain.system).toBe("rules");
+    expect(plain.tools?.[0]).not.toHaveProperty("cache_control");
   });
 
   it("normalises an SDK message: text + tool_use kept, thinking dropped, usage mapped", () => {

@@ -4,6 +4,7 @@ import {
   type ModelProvider,
   type ModelRequest,
   type ModelResponse,
+  type Usage,
 } from "../types.js";
 
 type Scripted = ModelResponse | Error | ((request: ModelRequest) => ModelResponse | Error);
@@ -39,7 +40,7 @@ export class FakeProvider implements ModelProvider {
 
 let counter = 0;
 
-export function reply(text: string, usage = { inputTokens: 10, outputTokens: 5 }): ModelResponse {
+export function reply(text: string, usage: Partial<Usage> = { inputTokens: 10, outputTokens: 5 }): ModelResponse {
   return {
     model: "",
     content: [{ type: "text", text }],

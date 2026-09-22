@@ -60,12 +60,21 @@ export class ConsoleExporter implements TraceExporter {
     this.log(`run ${run.name} [${run.status}] ${run.durationMs}ms`);
     for (const s of run.spans) {
       const cost = s.costUsd === undefined ? "" : s.costUsd === null ? " cost=?" : ` cost=$${s.costUsd.toFixed(5)}`;
-      const tokens = s.usage ? ` in=${s.usage.inputTokens} out=${s.usage.outputTokens}` : "";
+      const tokens = s.usage ? ` in=${s.usage.inputTokens} out=${s.usage.outputTokens}${cacheTokens(s.usage)}` : "";
       this.log(`  ${s.kind.padEnd(10)} ${s.name.padEnd(24)} ${String(s.durationMs).padStart(6)}ms${tokens}${cost}${s.error ? ` ERROR ${s.error}` : ""}`);
     }
     const t = run.totals;
-    this.log(`  totals: ${t.modelCalls} model calls, ${t.toolCalls} tool calls (${t.toolErrors} failed), ${t.usage.inputTokens}+${t.usage.outputTokens} tokens, cost ${t.costUsd === null ? "unknown" : `$${t.costUsd.toFixed(5)}`}`);
+    this.log(`  totals: ${t.modelCalls} model calls, ${t.toolCalls} tool calls (${t.toolErrors} failed), ${t.usage.inputTokens}+${t.usage.outputTokens} tokens${cacheTokens(t.usage)}, cost ${t.costUsd === null ? "unknown" : `$${t.costUsd.toFixed(5)}`}`);
   }
+}
+
+/**
+ * Cached tokens are billed at their own rates, so a line that folded them into
+ * `in=` would misreport the call. Shown only when a cache was actually in play.
+ */
+function cacheTokens(usage: Usage): string {
+  if (usage.cacheReadTokens === 0 && usage.cacheWriteTokens === 0) return "";
+  return ` cache_r=${usage.cacheReadTokens} cache_w=${usage.cacheWriteTokens}`;
 }
 
 export interface TracerOptions {

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import {
+  ConsoleExporter,
   FakeProvider,
   MemoryExporter,
   Tracer,
@@ -121,6 +122,31 @@ describe("runAgent", () => {
     expect(run.totals).toMatchObject({ modelCalls: 2, toolCalls: 1, toolErrors: 0 });
     // 120 in × $5/M + 58 out × $25/M
     expect(run.totals.costUsd).toBeCloseTo(120 * 5e-6 + 58 * 25e-6, 9);
+  });
+
+  it("surfaces cache reads and writes on the model spans, in the totals and in the cost", async () => {
+    const exporter = new MemoryExporter();
+    const lines: string[] = [];
+    const tracer = new Tracer({ exporters: [exporter, new ConsoleExporter((l) => lines.push(l))], now: () => 1000 });
+    const provider = new FakeProvider(
+      [
+        // First call writes the prefix to the cache, the second one reads it back.
+        { ...callTools([{ name: "get_weather", input: { city: "X" } }]), usage: { inputTokens: 10, outputTokens: 8, cacheReadTokens: 0, cacheWriteTokens: 2000 } },
+        reply("ok", { inputTokens: 12, outputTokens: 5, cacheReadTokens: 2000 }),
+      ],
+      "claude-opus-5",
+    );
+    const result = await runAgent({ provider, input: "x", tools: [weather], tracer });
+
+    const run = exporter.runs[0]!;
+    const modelSpans = run.spans.filter((s) => s.kind === "model.call");
+    expect(modelSpans[0]!.usage).toMatchObject({ cacheWriteTokens: 2000, cacheReadTokens: 0 });
+    expect(modelSpans[1]!.usage).toMatchObject({ cacheWriteTokens: 0, cacheReadTokens: 2000 });
+    expect(run.totals.usage).toEqual({ inputTokens: 22, outputTokens: 13, cacheReadTokens: 2000, cacheWriteTokens: 2000 });
+    expect(result.usage).toMatchObject({ cacheReadTokens: 2000, cacheWriteTokens: 2000 });
+    // cache reads are 10% of input, writes 125% — folding either into `in` would misprice the run
+    expect(run.totals.costUsd).toBeCloseTo(22 * 5e-6 + 13 * 25e-6 + 2000 * 0.5e-6 + 2000 * 6.25e-6, 9);
+    expect(lines.some((l) => l.includes("cache_r=2000 cache_w=2000"))).toBe(true);
   });
 
   it("marks the trace as failed and rethrows when the provider throws", async () => {
