@@ -103,10 +103,11 @@ src/
   pricing.ts         per-model prices, costUsd()
   fallback.ts        FallbackProvider
   sse.ts             agentSSE(): the run as a text/event-stream Response
+  client.ts          readAgentSSE(): the same stream back into typed events
   providers/
     anthropic.ts     the only file importing @anthropic-ai/sdk
     fake.ts          scripted provider + builders for tests
-tests/               36 tests, no network, no API key
+tests/               44 tests, no network, no API key
 ```
 
 ## SSE
@@ -118,6 +119,25 @@ export const POST = async (req: Request) =>
 ```
 
 Events: `text_delta`, `model_call`, `tool_call`, `tool_result`, `done`.
+
+On the other end, `agent-runtime/client` reads that stream back:
+
+```ts
+import { readAgentSSE } from "agent-runtime/client";
+
+const result = await readAgentSSE(await fetch("/api/agent", { method: "POST", body }), {
+  text_delta: (e) => setAnswer((a) => a + e.text),
+  tool_call: (e) => setStatus(`running ${e.name}…`),
+  error: (e) => setError(e.message),
+});
+```
+
+It buffers until a frame is whole — a chunk can split anywhere, including
+mid-JSON — resolves with the `done` result, and drops event types it does not
+know so a newer server stays readable by an older UI. Without an `error`
+handler a failed run rejects, because a stream that broke must not look like
+one that finished. The module is type-only against the loop, so importing it
+pulls no server code into a bundle.
 
 ## Run
 
