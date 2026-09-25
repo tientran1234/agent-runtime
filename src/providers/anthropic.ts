@@ -17,6 +17,13 @@ import {
 
 export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
 
+/**
+ * The beta that gates the `fallbacks: "default"` form. The header and the form
+ * are one unit — this header with a `fallbacks` array, or the array's own
+ * earlier header with `"default"`, is a 400 either way.
+ */
+export const SERVER_FALLBACK_BETA = "server-side-fallback-2026-07-01";
+
 export interface AnthropicProviderOptions {
   client?: Anthropic;
   /** Default: claude-opus-5. */
@@ -35,6 +42,13 @@ export interface AnthropicProviderOptions {
    * again — true for a tool loop, not for a single call.
    */
   cache?: boolean;
+  /**
+   * Re-run a request the safety classifiers decline on Anthropic's substitute
+   * for that refusal category, server-side, inside the same call — so the loop
+   * gets an answer instead of `status: "refused"`. Off by default: the answer
+   * then comes from a model the caller did not ask for, at that model's prices.
+   */
+  serverFallbacks?: boolean;
 }
 
 export class AnthropicProvider implements ModelProvider {
@@ -125,12 +139,13 @@ export function toSystem(system: string, cache = false): string | Anthropic.Text
   return cache ? [{ type: "text", text: system, cache_control: EPHEMERAL }] : system;
 }
 
-export function fromMessage(message: Anthropic.Message): ModelResponse {
+export function fromMessage(message: Anthropic.Message | Anthropic.Beta.BetaMessage): ModelResponse {
   const content: ModelResponse["content"] = [];
   for (const block of message.content) {
     if (block.type === "text") content.push({ type: "text", text: block.text });
     else if (block.type === "tool_use") content.push({ type: "tool_use", id: block.id, name: block.name, input: block.input });
-    // thinking / redacted_thinking blocks carry nothing the loop acts on
+    // thinking, redacted_thinking and the fallback block carry nothing the
+    // loop acts on — who answered is already on `message.model`
   }
   return {
     model: message.model,
@@ -145,7 +160,7 @@ export function fromMessage(message: Anthropic.Message): ModelResponse {
   };
 }
 
-function toStopReason(reason: Anthropic.Message["stop_reason"]): StopReason {
+function toStopReason(reason: Anthropic.Message["stop_reason"] | Anthropic.Beta.BetaMessage["stop_reason"]): StopReason {
   switch (reason) {
     case "end_turn":
     case "tool_use":

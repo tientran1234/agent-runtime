@@ -1,23 +1,28 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it } from "vitest";
-import { AnthropicProvider, fromMessage, toMessageParams, toProviderError, toSystem, toTools } from "../src/providers/anthropic.js";
+import { AnthropicProvider, SERVER_FALLBACK_BETA, fromMessage, toMessageParams, toProviderError, toSystem, toTools } from "../src/providers/anthropic.js";
+import type { AnthropicProviderOptions } from "../src/providers/anthropic.js";
 import { ProviderError } from "../src/index.js";
 
+/** The beta params are a superset, so one type covers whichever endpoint was called. */
+type SentParams = Anthropic.Beta.Messages.MessageCreateParams;
+type Endpoint = "messages" | "beta.messages";
+
 /** Enough of the SDK surface for `complete()` to run: capture the params, answer from a canned message. */
-function stubClient(capture: (params: Anthropic.MessageCreateParams) => void): Anthropic {
+function stubClient(capture: (params: SentParams, endpoint: Endpoint) => void): Anthropic {
   const message = {
     model: "claude-opus-5",
     stop_reason: "end_turn",
     content: [{ type: "text", text: "ok" }],
     usage: { input_tokens: 1, output_tokens: 1 },
   } as unknown as Anthropic.Message;
+  const streamOn = (endpoint: Endpoint) => (params: SentParams) => {
+    capture(params, endpoint);
+    return { on: () => {}, finalMessage: async () => message };
+  };
   return {
-    messages: {
-      stream(params: Anthropic.MessageCreateParams) {
-        capture(params);
-        return { on: () => {}, finalMessage: async () => message };
-      },
-    },
+    messages: { stream: streamOn("messages") },
+    beta: { messages: { stream: streamOn("beta.messages") } },
   } as unknown as Anthropic;
 }
 
@@ -56,7 +61,7 @@ describe("anthropic mapping", () => {
 
   it("sends both breakpoints in one request when cache is on, and none when it is off", async () => {
     const send = async (cache: boolean) => {
-      let sent: Anthropic.MessageCreateParams | undefined;
+      let sent: SentParams | undefined;
       const provider = new AnthropicProvider({
         cache,
         client: stubClient((params) => (sent = params)),
@@ -123,5 +128,67 @@ describe("anthropic mapping", () => {
     expect(toProviderError(net)).toMatchObject({ retryable: true });
     expect(toProviderError(bad)).toMatchObject({ retryable: false, status: 400 });
     expect(toProviderError(new Error("x"))).toBeInstanceOf(ProviderError);
+  });
+});
+
+describe("server-side refusal fallbacks", () => {
+  /** One request through the stub: which endpoint it went to, and what it carried. */
+  async function send(options: AnthropicProviderOptions = {}) {
+    let params: SentParams | undefined;
+    let endpoint: Endpoint | undefined;
+    const provider = new AnthropicProvider({
+      ...options,
+      client: stubClient((sent, via) => {
+        params = sent;
+        endpoint = via;
+      }),
+    });
+    await provider.complete({
+      system: "rules",
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      tools: [{ name: "f", description: "d", inputSchema: {} }],
+    });
+    return { endpoint, params: params! };
+  }
+
+  it("stays on the plain endpoint, asking for no fallback, by default", async () => {
+    const { endpoint, params } = await send();
+    expect(endpoint).toBe("messages");
+    expect(params).not.toHaveProperty("fallbacks");
+    expect(params).not.toHaveProperty("betas");
+  });
+
+  it("sends `fallbacks: \"default\"` under the one beta that gates that form", async () => {
+    const { endpoint, params } = await send({ serverFallbacks: true });
+    expect(endpoint).toBe("beta.messages");
+    expect(params.fallbacks).toBe("default");
+    // The array form has its own, earlier header; either header paired with the
+    // other form is rejected, so the two travel together or not at all.
+    expect(params.betas).toEqual(["server-side-fallback-2026-07-01"]);
+    expect(SERVER_FALLBACK_BETA).toBe("server-side-fallback-2026-07-01");
+  });
+
+  it("leaves the rest of the request byte-identical, so the prefix still caches", async () => {
+    const plain = await send({ cache: true, effort: "high" });
+    const withFallback = await send({ cache: true, effort: "high", serverFallbacks: true });
+    const { betas: _betas, fallbacks: _fallbacks, ...rest } = withFallback.params;
+    expect(rest).toEqual(plain.params);
+  });
+
+  it("reports the substitute as the model that answered, and drops the fallback block", () => {
+    const message = {
+      model: "claude-opus-4-8",
+      stop_reason: "end_turn",
+      content: [
+        { type: "fallback", from: { model: "claude-opus-5" }, to: { model: "claude-opus-4-8" } },
+        { type: "text", text: "ok" },
+      ],
+      usage: { input_tokens: 5, output_tokens: 2 },
+    } as unknown as Anthropic.Beta.BetaMessage;
+
+    const out = fromMessage(message);
+    // Cost is looked up per span on this field, so it has to be the substitute.
+    expect(out.model).toBe("claude-opus-4-8");
+    expect(out.content).toEqual([{ type: "text", text: "ok" }]);
   });
 });
