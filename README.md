@@ -91,6 +91,16 @@ because a cache write costs 1.25× input: it pays for itself across a tool loop,
 not on a single call. Cached tokens are priced apart from plain input and are
 reported on each model span and in `Run.totals.usage`.
 
+**Server-side refusal fallbacks are opt-in too.**
+`new AnthropicProvider({ serverFallbacks: true })` sends `fallbacks: "default"`
+under the beta that gates that form, so a request the safety classifiers decline
+is re-run on Anthropic's substitute for that refusal category inside the same
+call — the loop gets an answer instead of `status: "refused"`. `"default"`
+routes by category rather than naming a model, so there is no pinned substitute
+to migrate when one is retired. Off by default: the answer then comes from a
+model the caller did not ask for, on that model's bill. `response.model` names
+whoever answered, and the span's cost follows it.
+
 ## Layout
 
 ```
@@ -107,7 +117,7 @@ src/
   providers/
     anthropic.ts     the only file importing @anthropic-ai/sdk
     fake.ts          scripted provider + builders for tests
-tests/               44 tests, no network, no API key
+tests/               48 tests, no network, no API key
 ```
 
 ## SSE
