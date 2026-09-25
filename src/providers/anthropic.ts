@@ -59,6 +59,7 @@ export class AnthropicProvider implements ModelProvider {
   private readonly effort: Effort | undefined;
   private readonly thinking: boolean;
   private readonly cache: boolean;
+  private readonly serverFallbacks: boolean;
 
   constructor(options: AnthropicProviderOptions = {}) {
     this.client = options.client ?? new Anthropic();
@@ -67,24 +68,34 @@ export class AnthropicProvider implements ModelProvider {
     this.effort = options.effort;
     this.thinking = options.thinking ?? true;
     this.cache = options.cache ?? false;
+    this.serverFallbacks = options.serverFallbacks ?? false;
   }
 
   async complete(request: ModelRequest): Promise<ModelResponse> {
     try {
+      const params = {
+        model: this.model,
+        max_tokens: this.maxTokens,
+        ...(request.system !== undefined ? { system: toSystem(request.system, this.cache) } : {}),
+        messages: toMessageParams(request.messages),
+        ...(request.tools && request.tools.length > 0 ? { tools: toTools(request.tools, this.cache) } : {}),
+        ...(this.thinking ? { thinking: { type: "adaptive" as const } } : {}),
+        ...(this.effort ? { output_config: { effort: this.effort } } : {}),
+      };
+      const options = request.signal ? { signal: request.signal } : undefined;
       // Always stream: a long answer then cannot hit the HTTP timeout, and
-      // finalMessage() gives back the complete Message either way.
-      const stream = this.client.messages.stream(
-        {
-          model: this.model,
-          max_tokens: this.maxTokens,
-          ...(request.system !== undefined ? { system: toSystem(request.system, this.cache) } : {}),
-          messages: toMessageParams(request.messages),
-          ...(request.tools && request.tools.length > 0 ? { tools: toTools(request.tools, this.cache) } : {}),
-          ...(this.thinking ? { thinking: { type: "adaptive" as const } } : {}),
-          ...(this.effort ? { output_config: { effort: this.effort } } : {}),
-        },
-        request.signal ? { signal: request.signal } : undefined,
-      );
+      // finalMessage() gives back the complete Message either way. Each branch
+      // drains its own stream because the two endpoints' helpers are unrelated
+      // types, and a union of them has no callable `on`.
+      if (this.serverFallbacks) {
+        const stream = this.client.beta.messages.stream(
+          { ...params, betas: [SERVER_FALLBACK_BETA], fallbacks: "default" },
+          options,
+        );
+        if (request.onTextDelta) stream.on("text", request.onTextDelta);
+        return fromMessage(await stream.finalMessage());
+      }
+      const stream = this.client.messages.stream(params, options);
       if (request.onTextDelta) stream.on("text", request.onTextDelta);
       return fromMessage(await stream.finalMessage());
     } catch (err) {
