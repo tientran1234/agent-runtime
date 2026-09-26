@@ -141,6 +141,7 @@ export function toTools(tools: readonly ToolSpec[], cache = false): Anthropic.To
     name: t.name,
     description: t.description,
     input_schema: t.inputSchema as Anthropic.Tool.InputSchema,
+    ...(t.strict ? { strict: true } : {}),
     ...(cache && i === tools.length - 1 ? { cache_control: EPHEMERAL } : {}),
   }));
 }

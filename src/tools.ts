@@ -51,7 +51,59 @@ export function defineTool<S extends z.ZodType>(definition: {
 /** What gets sent to the model. */
 export function toToolSpec(tool: ToolDefinition): ToolSpec {
   const { $schema: _dropped, ...schema } = z.toJSONSchema(tool.schema) as Record<string, unknown>;
-  return { name: tool.name, description: tool.description, inputSchema: schema };
+  if (!tool.strict) return { name: tool.name, description: tool.description, inputSchema: schema };
+
+  const problems = unenforceable(schema, "(root)");
+  if (problems.length > 0) {
+    throw new Error(
+      `tool ${tool.name} asked for strict but its schema cannot be enforced — ${problems.join("; ")}. ` +
+        `Close every object and require every property: model an absent value as .nullable() rather than .optional(), ` +
+        `and an open map as a fixed set of keys.`,
+    );
+  }
+  return { name: tool.name, description: tool.description, inputSchema: schema, strict: true };
+}
+
+/**
+ * Why this is a hard failure and not a silent downgrade: strict is a promise
+ * made to `execute` that it will never see input the schema rejects. Sending
+ * the tool without it would keep the run going while quietly breaking that
+ * promise, so the definition is wrong and has to be fixed by the author.
+ */
+function unenforceable(node: unknown, path: string): string[] {
+  if (node === null || typeof node !== "object" || Array.isArray(node)) return [];
+  const schema = node as Record<string, unknown>;
+  const problems: string[] = [];
+  const properties = (schema.properties ?? {}) as Record<string, unknown>;
+  const names = Object.keys(properties);
+
+  if (schema.type === "object" || names.length > 0) {
+    if (schema.additionalProperties !== false) problems.push(`${path}: additionalProperties must be false`);
+    const required = Array.isArray(schema.required) ? (schema.required as unknown[]) : [];
+    const missing = names.filter((name) => !required.includes(name));
+    if (missing.length > 0) problems.push(`${path}: every property must be required, so ${missing.join(", ")} cannot be optional`);
+  }
+
+  for (const [name, child] of Object.entries(properties)) {
+    problems.push(...unenforceable(child, path === "(root)" ? name : `${path}.${name}`));
+  }
+  // Objects also hide under array items, union branches and $defs references.
+  for (const key of ["items", "additionalItems", "not"]) {
+    if (key in schema) problems.push(...unenforceable(schema[key], `${path}.${key}`));
+  }
+  for (const key of ["anyOf", "oneOf", "allOf", "prefixItems"]) {
+    const branches = schema[key];
+    if (Array.isArray(branches)) branches.forEach((branch, i) => problems.push(...unenforceable(branch, `${path}.${key}[${i}]`)));
+  }
+  for (const key of ["$defs", "definitions"]) {
+    const defs = schema[key];
+    if (defs !== null && typeof defs === "object") {
+      for (const [name, def] of Object.entries(defs as Record<string, unknown>)) {
+        problems.push(...unenforceable(def, `${key}.${name}`));
+      }
+    }
+  }
+  return problems;
 }
 
 export interface ToolOutcome {
