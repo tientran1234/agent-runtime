@@ -101,6 +101,19 @@ to migrate when one is retired. Off by default: the answer then comes from a
 model the caller did not ask for, on that model's bill. `response.model` names
 whoever answered, and the span's cost follows it.
 
+**Strict tool inputs are opt-in, and checked before they are sent.**
+`defineTool({ strict: true })` asks the provider to guarantee the model's input
+matches the schema, instead of only describing it. A provider can only promise
+that for a schema it can enforce — every object closed
+(`additionalProperties: false`), every property in `required` — and rejects the
+whole request over one it cannot, naming neither the tool nor the property. So
+`toToolSpec` walks the generated schema first, including array items, union
+branches and `$defs`, and throws with the exact path. It throws rather than
+sending the tool unstrict, because a silent downgrade breaks the promise
+`execute` was given while the run carries on. Express an absent value as
+`.nullable()`, not `.optional()`; Zod still validates every input, strict or
+not.
+
 ## Layout
 
 ```
@@ -117,7 +130,7 @@ src/
   providers/
     anthropic.ts     the only file importing @anthropic-ai/sdk
     fake.ts          scripted provider + builders for tests
-tests/               48 tests, no network, no API key
+tests/               54 tests, no network, no API key
 ```
 
 ## SSE
