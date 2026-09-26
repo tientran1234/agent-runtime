@@ -51,3 +51,50 @@ describe("executeTool", () => {
     expect(out.isError).toBe(false);
   });
 });
+
+describe("strict tool specs", () => {
+  it("asks for enforcement and keeps the schema closed", () => {
+    const spec = toToolSpec(
+      defineTool({
+        name: "grade",
+        description: "Grade an answer",
+        input: z.object({ score: z.number(), notes: z.string().nullable() }),
+        strict: true,
+        execute: () => "ok",
+      }),
+    );
+    expect(spec.strict).toBe(true);
+    expect(spec.inputSchema).toMatchObject({ additionalProperties: false, required: ["score", "notes"] });
+  });
+
+  it("says nothing about strictness for a plain tool, so the request shape is unchanged", () => {
+    expect(toToolSpec(add)).not.toHaveProperty("strict");
+  });
+
+  it("refuses an optional property instead of letting the provider reject the tool", () => {
+    const optional = defineTool({
+      name: "search",
+      description: "",
+      input: z.object({ q: z.string(), limit: z.number().optional() }),
+      strict: true,
+      execute: () => "ok",
+    });
+    expect(() => toToolSpec(optional)).toThrow(/tool search .*\(root\): .*required.*limit/s);
+  });
+
+  it("refuses an open object nested inside the schema, naming where it is", () => {
+    const nested = defineTool({
+      name: "annotate",
+      description: "",
+      input: z.object({ tags: z.record(z.string(), z.string()) }),
+      strict: true,
+      execute: () => "ok",
+    });
+    expect(() => toToolSpec(nested)).toThrow(/tags: additionalProperties/);
+  });
+
+  it("accepts a schema with no properties at all — there is nothing to leave out", () => {
+    const now = defineTool({ name: "now", description: "", input: z.object({}), strict: true, execute: () => "ok" });
+    expect(toToolSpec(now).strict).toBe(true);
+  });
+});

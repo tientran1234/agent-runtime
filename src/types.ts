@@ -33,6 +33,12 @@ export interface ToolSpec {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  /**
+   * Ask the provider to guarantee the input matches `inputSchema`. Only set
+   * once the schema has been checked against the strict contract, because a
+   * provider rejects the whole request over a schema it cannot enforce.
+   */
+  strict?: boolean;
 }
 
 export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "refusal" | "other";

@@ -19,6 +19,8 @@ export interface ToolDefinition<Input = unknown> {
   timeoutMs: number;
   /** Default 16 000 characters. A tool that returns a 2 MB file must not eat the context window. */
   maxResultChars: number;
+  /** Default false. Have the provider enforce the schema, not just describe it. */
+  strict: boolean;
 }
 
 export function defineTool<S extends z.ZodType>(definition: {
@@ -28,6 +30,12 @@ export function defineTool<S extends z.ZodType>(definition: {
   execute: (input: z.output<S>, ctx: ToolContext) => Promise<unknown> | unknown;
   timeoutMs?: number;
   maxResultChars?: number;
+  /**
+   * Ask the provider to guarantee that `execute` only ever sees input this
+   * schema accepts. The schema has to be enforceable to qualify — see
+   * `toToolSpec`, which is where an unenforceable one is rejected.
+   */
+  strict?: boolean;
 }): ToolDefinition<z.output<S>> {
   return {
     name: definition.name,
@@ -36,6 +44,7 @@ export function defineTool<S extends z.ZodType>(definition: {
     execute: definition.execute,
     timeoutMs: definition.timeoutMs ?? 30_000,
     maxResultChars: definition.maxResultChars ?? 16_000,
+    strict: definition.strict ?? false,
   };
 }
 

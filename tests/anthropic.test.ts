@@ -42,6 +42,15 @@ describe("anthropic mapping", () => {
     expect(tool).toMatchObject({ name: "f", description: "d", input_schema: { type: "object" } });
   });
 
+  it("asks for enforcement only on the tools that opted into it", () => {
+    const [plain, strict] = toTools([
+      { name: "a", description: "d", inputSchema: {} },
+      { name: "b", description: "d", inputSchema: {}, strict: true },
+    ]);
+    expect(plain).not.toHaveProperty("strict");
+    expect(strict).toMatchObject({ strict: true });
+  });
+
   it("leaves the system prompt and the tools uncached by default", () => {
     expect(toSystem("rules")).toBe("rules");
     expect(toTools([{ name: "f", description: "d", inputSchema: {} }])[0]).not.toHaveProperty("cache_control");
