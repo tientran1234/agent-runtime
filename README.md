@@ -3,8 +3,9 @@
 The part of an LLM agent that is not the model: a bounded tool loop, memory
 that fits a token budget, a trace of what happened and what it cost, and a
 fallback chain for when a provider is down. Provider-agnostic by construction —
-the Anthropic adapter is one file on the official SDK, and a scripted fake
-runs the whole thing offline in tests.
+the Anthropic adapter is one file on the official SDK, the OpenAI-compatible one
+is one file on `fetch`, and a scripted fake runs the whole thing offline in
+tests.
 
 ```ts
 import { runAgent, defineTool, Tracer, ConsoleExporter } from "agent-runtime";
@@ -62,6 +63,24 @@ the only file that imports `@anthropic-ai/sdk`; it streams by default, maps
 `Message` to the neutral shape, and turns the SDK's typed errors into one
 `ProviderError` with a `retryable` verdict. Adding another provider is one
 adapter and nothing else.
+
+**The second adapter is where the port earns itself.**
+`providers/openai-compatible.ts` speaks `POST /chat/completions` over `fetch`,
+which is the shape OpenAI, Ollama, vLLM, llama.cpp and the gateways in front of
+them all serve, so `new OpenAICompatibleProvider({ model, baseURL })` reaches a
+local model and a hosted one with the same loop above it. No second SDK: the
+wire types in that file are the whole dependency. What the neutral types hide
+is real — every tool result becomes its own `tool` message and may not be
+interrupted by user text; `finish_reason` arrives as `"stop"` on turns that did
+call tools, so the content decides, except under `length`, where the arguments
+are cut off and the turn is `truncated` no matter what it called;
+`prompt_tokens` counts the cached prefix that `Usage.inputTokens` must not, or
+the cheap half of a prefix gets billed at the full rate. It streams by default
+and reassembles the stream into the shape the plain endpoint returns, so there
+is one mapping rather than two, and a stream that ends before a `finish_reason`
+is a retryable error rather than half an answer that looks whole. `maxTokens`
+has no default here: the ceiling belongs to the endpoint, and a value above a
+small local model's window is a 400 there.
 
 **Memory trims in turns, never in messages.** A turn starts when a human
 speaks and includes every tool call and result until the next human message.
@@ -129,8 +148,9 @@ src/
   client.ts          readAgentSSE(): the same stream back into typed events
   providers/
     anthropic.ts     the only file importing @anthropic-ai/sdk
+    openai-compatible.ts  the same port over POST /chat/completions, on fetch
     fake.ts          scripted provider + builders for tests
-tests/               54 tests, no network, no API key
+tests/               80 tests, no network, no API key
 ```
 
 ## SSE

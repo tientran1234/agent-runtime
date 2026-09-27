@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-09-27
+
+- OpenAI-compatible provider (`providers/openai-compatible.ts`, `fetch`-based, covers Ollama and OpenAI endpoints) implementing `ModelProvider`, exported as `agent-runtime/openai-compatible`, so the loop runs against a local model without a second SDK.
+
 ## 2026-09-26
 
 - `strict: true` passthrough on tool specs (schema must carry `additionalProperties: false` + `required`); `defineTool({ strict: true })`, with an unenforceable schema rejected where the tool is defined rather than by the provider.
