@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
-import { defineTool, executeTool, toToolSpec } from "../src/index.js";
+import { defineTool, executeTool, semaphore, toToolSpec } from "../src/index.js";
 
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -145,6 +145,33 @@ describe("approval gates", () => {
     const quick = defineTool({ name: "quick", description: "", input: z.object({}), timeoutMs: 30, execute: () => "ok" });
     const out = await executeTool(quick, {}, {}, { approve: async () => (await sleep(80), { allow: true }) });
     expect(out).toMatchObject({ isError: false, content: "ok" });
+  });
+});
+
+describe("semaphore", () => {
+  it("holds the line at its max and serves waiters in the order they arrived", async () => {
+    const limit = semaphore(2);
+    let active = 0;
+    let peak = 0;
+    const started: number[] = [];
+    const task = (n: number) =>
+      limit(async () => {
+        started.push(n);
+        peak = Math.max(peak, ++active);
+        await sleep(5);
+        active--;
+        return n;
+      });
+
+    expect(await Promise.all([task(1), task(2), task(3), task(4), task(5)])).toEqual([1, 2, 3, 4, 5]);
+    expect(peak).toBe(2);
+    expect(started).toEqual([1, 2, 3, 4, 5]);
+  });
+
+  it("frees the slot when the call throws, so one failure does not wedge the queue", async () => {
+    const limit = semaphore(1);
+    await expect(limit(async () => Promise.reject(new Error("boom")))).rejects.toThrow("boom");
+    expect(await limit(async () => "after")).toBe("after");
   });
 });
 

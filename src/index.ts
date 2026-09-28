@@ -1,7 +1,7 @@
 export { runAgent } from "./loop.js";
 export type { AgentEvent, AgentOptions, AgentResult, AgentStatus } from "./loop.js";
 
-export { defineTool, executeTool, toToolSpec } from "./tools.js";
+export { defineTool, executeTool, semaphore, toToolSpec } from "./tools.js";
 export type {
   BeforeToolCall,
   ExecuteOptions,

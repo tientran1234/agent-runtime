@@ -188,12 +188,61 @@ export async function executeTool(
     return done(`invalid input for ${tool.name}: ${parsed.error.issues.map((i) => `${i.path.join(".") || "(root)"}: ${i.message}`).join("; ")}`, true);
   }
 
+  // Approval sits between validation and the side effect: after it, because
+  // whoever approves must see the input `execute` will really get; before it,
+  // because afterwards there is nothing left to approve.
+  if (options.approve) {
+    let decision: ToolDecision;
+    try {
+      decision = await options.approve(parsed.data);
+    } catch (err) {
+      // Fail closed. A gate that breaks must not become an open door.
+      return done(`tool ${tool.name} was not approved: the approval check failed: ${messageOf(err)}`, true);
+    }
+    if (!decision.allow) {
+      return done(`tool ${tool.name} was not approved${decision.reason ? `: ${decision.reason}` : ""}`, true);
+    }
+  }
+
+  const run = () => withTimeout(Promise.resolve(tool.execute(parsed.data, ctx)), tool.timeoutMs, tool.name);
   try {
-    const result = await withTimeout(Promise.resolve(tool.execute(parsed.data, ctx)), tool.timeoutMs, tool.name);
+    // `timeoutMs` is the tool's own clock, so neither the wait behind a
+    // concurrency cap nor the wait on a human is inside it — a call must not
+    // expire for queueing. `durationMs` still spans the whole thing, so a trace
+    // reports the latency the caller actually saw.
+    const result = await (options.limit ? options.limit(run) : run());
     return done(typeof result === "string" ? result : JSON.stringify(result ?? null), false);
   } catch (err) {
-    return done(err instanceof Error ? err.message : String(err), true);
+    return done(messageOf(err), true);
   }
+}
+
+function messageOf(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/**
+ * At most `max` calls in flight; the rest wait in the order they arrived, since
+ * that is the order the model asked for them in. A finishing call hands its slot
+ * straight to the next waiter instead of releasing it and letting the waiter
+ * re-take it — the gap between those two is where a caller arriving in between
+ * would slip past the cap.
+ */
+export function semaphore(max: number): Limit {
+  if (!(max >= 1)) throw new Error(`semaphore needs a max of at least 1, got ${String(max)}`);
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  return async <T>(fn: () => Promise<T>): Promise<T> => {
+    if (active >= max) await new Promise<void>((resolve) => waiting.push(resolve));
+    else active++;
+    try {
+      return await fn();
+    } finally {
+      const next = waiting.shift();
+      if (next) next();
+      else active--;
+    }
+  };
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number, name: string): Promise<T> {

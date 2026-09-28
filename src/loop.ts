@@ -1,4 +1,4 @@
-import { executeTool, toToolSpec, type BeforeToolCall, type ToolContext, type ToolDefinition } from "./tools.js";
+import { executeTool, semaphore, toToolSpec, type BeforeToolCall, type Limit, type ToolContext, type ToolDefinition } from "./tools.js";
 import type { ConversationMemory } from "./memory.js";
 import type { Run, Tracer } from "./trace.js";
 import {
@@ -67,6 +67,13 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   const specs = tools.length > 0 ? tools.map(toToolSpec) : undefined;
   const maxIterations = options.maxIterations ?? 10;
   const emit = options.onEvent ?? (() => {});
+  const gate = options.beforeToolCall;
+  // One limiter per capped tool, scoped to this run — which is the scope the
+  // parallelism has, since a turn's calls are the only ones ever in flight.
+  const limits = new Map<string, Limit>();
+  for (const tool of tools) {
+    if (Number.isFinite(tool.maxConcurrency)) limits.set(tool.name, semaphore(tool.maxConcurrency));
+  }
 
   const transcript: ChatMessage[] =
     typeof options.input === "string"
@@ -133,8 +140,19 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
           emit({ type: "tool_call", id: call.id, name: call.name, input: call.input });
           const toolSpan = run?.startSpan("tool.call", call.name, { toolUseId: call.id });
           const tool = byName.get(call.name);
+          const limit = limits.get(call.name);
+          // A name with no tool behind it never reaches the gate: there is
+          // nothing to approve, and the model needs the mistake back either way.
           const outcome = tool
-            ? await executeTool(tool, call.input, { ...options.toolContext, ...(options.signal ? { signal: options.signal } : {}) })
+            ? await executeTool(
+                tool,
+                call.input,
+                { ...options.toolContext, ...(options.signal ? { signal: options.signal } : {}) },
+                {
+                  ...(gate ? { approve: (input: unknown) => gate({ tool, id: call.id, input }) } : {}),
+                  ...(limit ? { limit } : {}),
+                },
+              )
             : { content: `unknown tool: ${call.name}`, isError: true, durationMs: 0 };
           toolSpan?.setAttributes({ isError: outcome.isError, durationMs: outcome.durationMs }).end(outcome.isError ? outcome.content : undefined);
           emit({ type: "tool_result", id: call.id, name: call.name, ...outcome });
