@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import {
   ConsoleExporter,
@@ -11,7 +11,10 @@ import {
   runAgent,
   stoppedWith,
   type AgentEvent,
+  type PendingToolCall,
 } from "../src/index.js";
+
+const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 const weather = defineTool({
   name: "get_weather",
@@ -154,5 +157,144 @@ describe("runAgent", () => {
     const provider = new FakeProvider([new Error("api down")]);
     await expect(runAgent({ provider, input: "x", tracer: new Tracer({ exporters: [exporter] }) })).rejects.toThrow("api down");
     expect(exporter.runs[0]).toMatchObject({ status: "error", error: "api down" });
+  });
+});
+
+describe("per-tool concurrency in the loop", () => {
+  it("keeps a tool inside its maxConcurrency across a turn's parallel calls", async () => {
+    let inFlight = 0;
+    let peak = 0;
+    const scrape = defineTool({
+      name: "scrape",
+      description: "Fetch one page",
+      input: z.object({ url: z.string() }),
+      maxConcurrency: 2,
+      execute: async ({ url }) => {
+        peak = Math.max(peak, ++inFlight);
+        await sleep(5);
+        inFlight--;
+        return url;
+      },
+    });
+    const urls = ["a", "b", "c", "d", "e"];
+    const provider = new FakeProvider([callTools(urls.map((url) => ({ name: "scrape", input: { url }, id: url }))), reply("done")]);
+    await runAgent({ provider, input: "scrape all", tools: [scrape] });
+
+    expect(peak).toBe(2);
+    // The cap queues the calls; it must not drop or reorder any of their results.
+    const results = provider.calls[1]!.messages[2]!;
+    expect(results.content.map((p) => (p.type === "tool_result" ? p.content : p.type))).toEqual(urls);
+  });
+
+  it("limits each tool on its own, so one tool's queue does not stall another", async () => {
+    const active = new Set<string>();
+    let peak = 0;
+    const serial = (name: string) =>
+      defineTool({
+        name,
+        description: "",
+        input: z.object({}),
+        maxConcurrency: 1,
+        execute: async () => {
+          active.add(name);
+          await sleep(5);
+          peak = Math.max(peak, active.size);
+          active.delete(name);
+          return name;
+        },
+      });
+    const provider = new FakeProvider([
+      callTools([
+        { name: "left", input: {}, id: "l1" },
+        { name: "right", input: {}, id: "r1" },
+        { name: "left", input: {}, id: "l2" },
+        { name: "right", input: {}, id: "r2" },
+      ]),
+      reply("done"),
+    ]);
+    await runAgent({ provider, input: "x", tools: [serial("left"), serial("right")] });
+    expect(peak).toBe(2);
+  });
+});
+
+describe("approval gates in the loop", () => {
+  const deleteAccount = (onRun: () => void) =>
+    defineTool({ name: "delete_account", description: "Delete an account", input: z.object({ id: z.string() }), execute: onRun });
+
+  it("turns a denied call into an error result and lets the model carry on", async () => {
+    let ran = 0;
+    const provider = new FakeProvider([
+      callTools([{ name: "delete_account", input: { id: "u1" }, id: "d1" }]),
+      reply("I need a human to approve that."),
+    ]);
+    const seen: PendingToolCall[] = [];
+    const result = await runAgent({
+      provider,
+      input: "delete u1",
+      tools: [deleteAccount(() => void ran++)],
+      beforeToolCall: (call) => (seen.push(call), { allow: false, reason: "needs a human" }),
+    });
+
+    expect(ran).toBe(0);
+    expect(result.status).toBe("completed");
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toMatchObject({ id: "d1", input: { id: "u1" } });
+    expect(seen[0]!.tool.name).toBe("delete_account");
+    const results = provider.calls[1]!.messages[2]!;
+    expect(results.content[0]).toMatchObject({
+      type: "tool_result",
+      isError: true,
+      content: "tool delete_account was not approved: needs a human",
+    });
+  });
+
+  it("never asks the gate about a tool that does not exist", async () => {
+    const asked: string[] = [];
+    const provider = new FakeProvider([callTools([{ name: "nope", input: {}, id: "x" }]), reply("ok")]);
+    await runAgent({
+      provider,
+      input: "go",
+      tools: [weather],
+      beforeToolCall: (call) => (asked.push(call.tool.name), { allow: true }),
+    });
+    expect(asked).toEqual([]);
+  });
+
+  it("does not hold a tool's concurrency slot while the gate waits", async () => {
+    let release = () => {};
+    const approved = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const asked: string[] = [];
+    const oneAtATime = defineTool({
+      name: "get_weather",
+      description: "Weather for a city",
+      input: z.object({ city: z.string() }),
+      maxConcurrency: 1,
+      execute: ({ city }) => `${city}: 22°C`,
+    });
+    const provider = new FakeProvider([
+      callTools([
+        { name: "get_weather", input: { city: "A" }, id: "a" },
+        { name: "get_weather", input: { city: "B" }, id: "b" },
+      ]),
+      reply("done"),
+    ]);
+    const run = runAgent({
+      provider,
+      input: "x",
+      tools: [oneAtATime],
+      beforeToolCall: async ({ id }) => {
+        asked.push(id);
+        await approved;
+        return { allow: true };
+      },
+    });
+
+    // Both gates are open at once: the slot is taken when the tool runs, not
+    // while a human is still deciding.
+    await vi.waitFor(() => expect(asked).toEqual(["a", "b"]));
+    release();
+    expect((await run).status).toBe("completed");
   });
 });

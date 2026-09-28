@@ -2,7 +2,16 @@ export { runAgent } from "./loop.js";
 export type { AgentEvent, AgentOptions, AgentResult, AgentStatus } from "./loop.js";
 
 export { defineTool, executeTool, toToolSpec } from "./tools.js";
-export type { ToolContext, ToolDefinition, ToolOutcome } from "./tools.js";
+export type {
+  BeforeToolCall,
+  ExecuteOptions,
+  Limit,
+  PendingToolCall,
+  ToolContext,
+  ToolDecision,
+  ToolDefinition,
+  ToolOutcome,
+} from "./tools.js";
 
 export { ConversationMemory, splitTurns } from "./memory.js";
 export type { MemoryOptions } from "./memory.js";

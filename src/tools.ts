@@ -21,6 +21,8 @@ export interface ToolDefinition<Input = unknown> {
   maxResultChars: number;
   /** Default false. Have the provider enforce the schema, not just describe it. */
   strict: boolean;
+  /** Default unlimited. Caps how many calls of this tool are in flight at once. */
+  maxConcurrency: number;
 }
 
 export function defineTool<S extends z.ZodType>(definition: {
@@ -36,7 +38,18 @@ export function defineTool<S extends z.ZodType>(definition: {
    * `toToolSpec`, which is where an unenforceable one is rejected.
    */
   strict?: boolean;
+  /**
+   * Cap on how many calls of this tool run at once, for a downstream that
+   * cannot take a whole turn's worth of parallel calls. Default unlimited.
+   */
+  maxConcurrency?: number;
 }): ToolDefinition<z.output<S>> {
+  const maxConcurrency = definition.maxConcurrency ?? Infinity;
+  // Caught here rather than mid-run, because a limit of zero is not a slow
+  // tool, it is a tool that can never run — and that is an authoring mistake.
+  if (!(maxConcurrency >= 1)) {
+    throw new Error(`tool ${definition.name}: maxConcurrency must be at least 1, got ${String(definition.maxConcurrency)}`);
+  }
   return {
     name: definition.name,
     description: definition.description,
@@ -45,6 +58,7 @@ export function defineTool<S extends z.ZodType>(definition: {
     timeoutMs: definition.timeoutMs ?? 30_000,
     maxResultChars: definition.maxResultChars ?? 16_000,
     strict: definition.strict ?? false,
+    maxConcurrency,
   };
 }
 
@@ -112,6 +126,41 @@ export interface ToolOutcome {
   durationMs: number;
 }
 
+/** A tool call that has validated but not run yet — what an approval gate judges. */
+export interface PendingToolCall {
+  /** The tool the call names. Its description is what an approval UI shows a human. */
+  tool: ToolDefinition;
+  /** The model's id for the call, so a decision can be traced back to the transcript. */
+  id: string;
+  /** Exactly the input `execute` receives if this call is allowed. */
+  input: unknown;
+}
+
+export type ToolDecision = { allow: true } | { allow: false; reason?: string };
+
+/**
+ * Asked about every tool call before it runs. There is no implicit allow: the
+ * hook has to answer, so a branch that forgets to cannot let a side effect
+ * through, and a hook that throws denies rather than falling open.
+ */
+export type BeforeToolCall = (call: PendingToolCall) => Promise<ToolDecision> | ToolDecision;
+
+/** Runs `fn` once whatever it guards has room for it. */
+export type Limit = <T>(fn: () => Promise<T>) => Promise<T>;
+
+export interface ExecuteOptions {
+  /**
+   * Asked to approve the validated input. `runAgent` binds the rest of the
+   * call's identity here from its `beforeToolCall`; a direct caller, having no
+   * tool_use id to bind, supplies whatever it knows.
+   */
+  approve?: (input: unknown) => Promise<ToolDecision> | ToolDecision;
+  /** Wraps the execution, so neither a queue nor a waiting human sits inside `timeoutMs`. */
+  limit?: Limit;
+  /** Injectable clock, for tests. */
+  now?: () => number;
+}
+
 /**
  * Run one tool call the way the model needs it run: validated input, bounded
  * time, bounded output, and every failure turned into an error *result* rather
@@ -122,8 +171,9 @@ export async function executeTool(
   tool: ToolDefinition,
   rawInput: unknown,
   ctx: ToolContext = {},
-  now: () => number = Date.now,
+  options: ExecuteOptions = {},
 ): Promise<ToolOutcome> {
+  const now = options.now ?? Date.now;
   const started = now();
   const done = (content: string, isError: boolean): ToolOutcome => ({
     content: truncate(content, tool.maxResultChars),

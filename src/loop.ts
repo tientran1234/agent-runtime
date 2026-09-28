@@ -1,4 +1,4 @@
-import { executeTool, toToolSpec, type ToolContext, type ToolDefinition } from "./tools.js";
+import { executeTool, toToolSpec, type BeforeToolCall, type ToolContext, type ToolDefinition } from "./tools.js";
 import type { ConversationMemory } from "./memory.js";
 import type { Run, Tracer } from "./trace.js";
 import {
@@ -47,6 +47,13 @@ export interface AgentOptions {
   onEvent?: (event: AgentEvent) => void;
   signal?: AbortSignal;
   toolContext?: Omit<ToolContext, "signal">;
+  /**
+   * Approval gate, asked about every tool call once its input has validated and
+   * before the tool runs. A denial becomes an error result the model can read
+   * and work around, so one refused call does not end the run — abort `signal`
+   * as well to stop there.
+   */
+  beforeToolCall?: BeforeToolCall;
 }
 
 /**
