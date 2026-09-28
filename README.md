@@ -47,9 +47,14 @@ result.usage;    // tokens across every model call
 - **No tool hangs the agent, and no tool floods the context.** Per-tool
   timeout (default 30 s) and result cap (default 16 000 chars, with a marker
   saying how much was cut).
-- **Parallel tool calls stay parallel.** All `tool_use` blocks in one turn run
-  concurrently, and all their results go back in one user message. Splitting
-  them across messages quietly trains the model to stop parallelising.
+- **Parallel tool calls stay parallel, up to a cap you choose.** All `tool_use`
+  blocks in one turn run concurrently, and all their results go back in one user
+  message. Splitting them across messages quietly trains the model to stop
+  parallelising. A tool given `maxConcurrency` queues its own calls without
+  holding up any other tool's.
+- **Nothing runs unapproved where a gate is set.** `beforeToolCall` is asked
+  about every call and has to answer. A denial — or a gate that throws — becomes
+  an error result the model can work around, and the tool never runs.
 - **Every stop is a status, never an exception.** Provider errors still throw
   — the caller has to know the difference between "the agent decided to stop"
   and "the network died".
@@ -81,6 +86,38 @@ is one mapping rather than two, and a stream that ends before a `finish_reason`
 is a retryable error rather than half an answer that looks whole. `maxTokens`
 has no default here: the ceiling belongs to the endpoint, and a value above a
 small local model's window is a 400 there.
+
+**A gate is asked at the one moment worth asking.** `beforeToolCall` is
+consulted for every call after its input has validated and before the tool runs.
+After, so whoever approves sees exactly the input `execute` will get and is
+never asked to judge a payload the schema would have rejected anyway; before,
+because afterwards there is nothing left to approve. The hook answers
+`{ allow: true }` or `{ allow: false, reason }` — there is no implicit allow,
+and a hook that throws denies, because a gate whose forgotten branch means yes
+is worse than no gate. A denial is an error result the model reads and works
+around, so one refused call does not end the run; abort `signal` as well to stop
+there.
+
+```ts
+await runAgent({
+  provider,
+  tools: [refundOrder],
+  input: "refund ord_42",
+  // `tool.description` and the validated `input` are what the human is shown.
+  beforeToolCall: ({ tool, input }) => askOnCall(tool.description, input),
+});
+```
+
+**A concurrency cap is per tool, and neither the queue nor the human is on the
+tool's clock.** `defineTool({ maxConcurrency: 2 })` bounds how many calls of
+that one tool are in flight, for a downstream that cannot take a whole turn's
+worth at once; every other tool runs unaffected, and unlimited stays the default
+so parallel calls stay parallel. A slot is taken when the tool runs, not while
+its gate waits — one pending approval must not starve the rest of the turn.
+`timeoutMs` measures the tool itself, so a call cannot expire for queueing,
+while `durationMs` still spans the wait and the trace reports the latency that
+was real. Limiters live for one run, which is the scope the parallelism has:
+a turn's calls are the only ones the loop ever has in flight.
 
 **Memory trims in turns, never in messages.** A turn starts when a human
 speaks and includes every tool call and result until the next human message.
@@ -138,7 +175,7 @@ not.
 ```
 src/
   types.ts           neutral messages, tool specs, ModelProvider port, ProviderError
-  tools.ts           defineTool (Zod) · executeTool: validate → timeout → truncate → result
+  tools.ts           defineTool (Zod) · executeTool: validate → approve → limit → timeout → truncate
   loop.ts            runAgent — the bounded loop, events, statuses
   memory.ts          ConversationMemory: token budget, turn-wise trimming, summariser hook
   trace.ts           Tracer / runs / spans, usage + cost, Memory and Console exporters
@@ -150,7 +187,7 @@ src/
     anthropic.ts     the only file importing @anthropic-ai/sdk
     openai-compatible.ts  the same port over POST /chat/completions, on fetch
     fake.ts          scripted provider + builders for tests
-tests/               80 tests, no network, no API key
+tests/               94 tests, no network, no API key
 ```
 
 ## SSE

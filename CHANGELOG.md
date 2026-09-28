@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-09-28
+
+- Per-tool concurrency limit and a `beforeToolCall` hook for human approval gates, so a call is judged against the input `execute` would really get and a capped tool queues its own calls without holding the turn or its own timeout.
+
 ## 2026-09-27
 
 - OpenAI-compatible provider (`providers/openai-compatible.ts`, `fetch`-based, covers Ollama and OpenAI endpoints) implementing `ModelProvider`, exported as `agent-runtime/openai-compatible`, so the loop runs against a local model without a second SDK.
