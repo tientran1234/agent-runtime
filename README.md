@@ -119,6 +119,52 @@ while `durationMs` still spans the wait and the trace reports the latency that
 was real. Limiters live for one run, which is the scope the parallelism has:
 a turn's calls are the only ones the loop ever has in flight.
 
+**A prompt is regression-testable because the model is scripted.** A
+`Scenario` is a system prompt, a tool set, an input, and the answers the model
+gives, run through `FakeProvider`; `assertScenario` compares what the loop did
+against a transcript shape — one line per message, tool calls and results by
+tool name. Payloads stay out of that shape: the script already fixes the
+wording, so asserting it would only restate the script, while what a prompt edit
+really moves is which tools get called, in what order, and how many turns it
+takes. What the shape *cannot* see is checked separately, because the prompt and
+the tool list are inputs to each call rather than messages: a run that sent the
+prompt only on its first call, or offered a tool the scenario never listed,
+produces the expected lines and would otherwise pass — so every request is
+checked for both, and a scripted turn the run never reached is a failure too. A
+mismatch prints an index-aligned diff, since a turn that moved is the
+regression, plus the transcript to paste once the change is the intended one.
+
+```ts
+import { assertScenario, callTools, reply, type Scenario } from "agent-runtime";
+
+const scenarios: Scenario[] = [
+  {
+    name: "looks an order up before refunding it",
+    system: SUPPORT_PROMPT,
+    tools: [getOrder, refundOrder],
+    input: "Refund ord_42.",
+    script: [
+      callTools([{ name: "get_order", input: { orderId: "ord_42" } }]),
+      callTools([{ name: "refund_order", input: { orderId: "ord_42" } }]),
+      reply("Refunded."),
+    ],
+    expect: {
+      status: "completed",
+      transcript: [
+        "user: text",
+        "assistant: tool_use(get_order)",
+        "user: tool_result(get_order ok)",
+        "assistant: tool_use(refund_order)",
+        "user: tool_result(refund_order ok)",
+        "assistant: text",
+      ],
+    },
+  },
+];
+
+for (const scenario of scenarios) it(scenario.name, () => assertScenario(scenario));
+```
+
 **Memory trims in turns, never in messages.** A turn starts when a human
 speaks and includes every tool call and result until the next human message.
 `ConversationMemory` drops whole turns from the oldest end, so a `tool_use`
@@ -182,12 +228,13 @@ src/
   pricing.ts         per-model prices, costUsd()
   fallback.ts        FallbackProvider
   sse.ts             agentSSE(): the run as a text/event-stream Response
+  regression.ts      scenarios: a scripted run, its transcript shape, and the diff
   client.ts          readAgentSSE(): the same stream back into typed events
   providers/
     anthropic.ts     the only file importing @anthropic-ai/sdk
     openai-compatible.ts  the same port over POST /chat/completions, on fetch
     fake.ts          scripted provider + builders for tests
-tests/               94 tests, no network, no API key
+tests/               109 tests, no network, no API key
 ```
 
 ## SSE

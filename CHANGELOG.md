@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-09-29
+
+- Prompt regression suite: scripted `FakeProvider` scenarios that assert the loop's transcript shape for a given system prompt, runnable in CI, with the prompt and the tool list checked on every model call so a shape that matches for a prompt the model never saw cannot pass.
+
 ## 2026-09-28
 
 - Per-tool concurrency limit and a `beforeToolCall` hook for human approval gates, so a call is judged against the input `execute` would really get and a capped tool queues its own calls without holding the turn or its own timeout.
