@@ -51,6 +51,25 @@ describe("renderTranscript", () => {
     expect(renderTranscript(shape("one", "A", "toolu_1"))).toEqual(renderTranscript(shape("two", "B", "toolu_77")));
   });
 
+  it("shows a paused turn as a line of its own, without reading the provider's block", () => {
+    const messages: ChatMessage[] = [
+      { role: "user", content: [{ type: "text", text: "search" }] },
+      {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Searching…" },
+          { type: "server_tool", raw: { type: "server_tool_use", name: "web_search", input: { query: "hanoi" } } },
+        ],
+      },
+      { role: "assistant", content: [{ type: "text", text: "22°C." }] },
+    ];
+
+    // Two assistant lines with no user message between them is what a resumed
+    // turn looks like, and a scenario asserting it would catch the pause going
+    // missing — or a run that suddenly needs two of them.
+    expect(renderTranscript(messages)).toEqual(["user: text", "assistant: text server_tool", "assistant: text"]);
+  });
+
   it("prints a message with no content rather than dropping it", () => {
     expect(renderTranscript([{ role: "assistant", content: [] }])).toEqual(["assistant: (empty)"]);
   });

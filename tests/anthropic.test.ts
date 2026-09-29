@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { AnthropicProvider, SERVER_FALLBACK_BETA, fromMessage, toMessageParams, toProviderError, toSystem, toTools } from "../src/providers/anthropic.js";
 import type { AnthropicProviderOptions } from "../src/providers/anthropic.js";
 import { ProviderError } from "../src/index.js";
+import type { ToolSpec } from "../src/index.js";
 
 /** The beta params are a superset, so one type covers whichever endpoint was called. */
 type SentParams = Anthropic.Beta.Messages.MessageCreateParams;
@@ -122,7 +123,10 @@ describe("anthropic mapping", () => {
   it("maps unknown stop reasons to other, known ones through", () => {
     const base = { content: [], usage: { input_tokens: 0, output_tokens: 0 }, model: "m" };
     expect(fromMessage({ ...base, stop_reason: "refusal" } as unknown as Anthropic.Message).stopReason).toBe("refusal");
-    expect(fromMessage({ ...base, stop_reason: "pause_turn" } as unknown as Anthropic.Message).stopReason).toBe("other");
+    // A paused turn is the loop's business now, so it keeps its name; a stop the
+    // loop has no answer for is still flattened.
+    expect(fromMessage({ ...base, stop_reason: "pause_turn" } as unknown as Anthropic.Message).stopReason).toBe("pause_turn");
+    expect(fromMessage({ ...base, stop_reason: "stop_sequence" } as unknown as Anthropic.Message).stopReason).toBe("other");
   });
 
   it("classifies SDK errors: 429/5xx/network retryable, 400 not", () => {
@@ -199,5 +203,86 @@ describe("server-side refusal fallbacks", () => {
     // Cost is looked up per span on this field, so it has to be the substitute.
     expect(out.model).toBe("claude-opus-4-8");
     expect(out.content).toEqual([{ type: "text", text: "ok" }]);
+  });
+});
+
+describe("server-side tools", () => {
+  const webSearch = { type: "web_search_20250305", name: "web_search", max_uses: 3 } as const;
+
+  /** What the API was handed for one request; `tools` says whether the run had client tools. */
+  async function sent(options: AnthropicProviderOptions, tools?: ToolSpec[]): Promise<SentParams> {
+    let params: SentParams | undefined;
+    const provider = new AnthropicProvider({ ...options, client: stubClient((p) => (params = p)) });
+    await provider.complete({
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      ...(tools ? { tools } : {}),
+    });
+    return params!;
+  }
+
+  const clientTool: ToolSpec = { name: "f", description: "d", inputSchema: {} };
+
+  it("passes server tools through untouched, ahead of the run's own tools", async () => {
+    const params = await sent({ serverTools: [webSearch] }, [clientTool]);
+    expect(params.tools?.[0]).toEqual(webSearch);
+    expect(params.tools?.[1]).toMatchObject({ name: "f" });
+  });
+
+  it("keeps the cache breakpoint at the end of the whole tool list", async () => {
+    const params = await sent({ serverTools: [webSearch], cache: true }, [clientTool]);
+    // Server tools are fixed configuration and the run's tools vary, but the
+    // breakpoint closes a prefix: put the server tools last and everything
+    // after the breakpoint would be re-sent uncached on every call.
+    expect(params.tools?.map((t) => (t as { cache_control?: unknown }).cache_control)).toEqual([undefined, { type: "ephemeral" }]);
+  });
+
+  it("sends them on a run that has no client tools at all", async () => {
+    const params = await sent({ serverTools: [webSearch] });
+    expect(params.tools).toEqual([webSearch]);
+  });
+
+  it("sends no tools when there are neither", async () => {
+    expect(await sent({})).not.toHaveProperty("tools");
+  });
+
+  it("carries a server tool's blocks as opaque parts and hands them back verbatim", () => {
+    const blocks = [
+      { type: "server_tool_use", id: "srvtoolu_1", name: "web_search", input: { query: "hanoi weather" } },
+      {
+        type: "web_search_tool_result",
+        tool_use_id: "srvtoolu_1",
+        content: [{ type: "web_search_result", url: "https://example.test", title: "Hanoi", encrypted_content: "…" }],
+      },
+    ];
+    const message = {
+      model: "claude-opus-5",
+      stop_reason: "pause_turn",
+      content: blocks,
+      usage: { input_tokens: 9, output_tokens: 3 },
+    } as unknown as Anthropic.Message;
+
+    const out = fromMessage(message);
+    expect(out.stopReason).toBe("pause_turn");
+    expect(out.content).toEqual(blocks.map((raw) => ({ type: "server_tool", raw })));
+
+    // Resuming the turn means the provider reading its own blocks again, so they
+    // have to survive the round trip exactly — including the encrypted content,
+    // which is the only thing that lets it skip re-running the search.
+    expect(toMessageParams([{ role: "assistant", content: out.content }])).toEqual([{ role: "assistant", content: blocks }]);
+  });
+
+  it("does not mistake a block it deliberately drops for one of theirs", () => {
+    const message = {
+      model: "m",
+      stop_reason: "end_turn",
+      content: [
+        { type: "thinking", thinking: "…", signature: "s" },
+        { type: "redacted_thinking", data: "…" },
+        { type: "text", text: "ok" },
+      ],
+      usage: { input_tokens: 1, output_tokens: 1 },
+    } as unknown as Anthropic.Message;
+
+    expect(fromMessage(message).content).toEqual([{ type: "text", text: "ok" }]);
   });
 });

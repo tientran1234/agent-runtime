@@ -49,6 +49,14 @@ export interface AnthropicProviderOptions {
    * then comes from a model the caller did not ask for, at that model's prices.
    */
   serverFallbacks?: boolean;
+  /**
+   * Tools the API runs on its own side — web search, code execution, a hosted
+   * MCP server — written exactly as its docs write them. The model calls them
+   * inside its own turn: this runtime never executes one, and their blocks ride
+   * along in the transcript so a paused turn can resume. A tool this process
+   * runs is a `defineTool` handed to `runAgent`, not one of these.
+   */
+  serverTools?: Anthropic.ToolUnion[];
 }
 
 export class AnthropicProvider implements ModelProvider {
@@ -60,6 +68,7 @@ export class AnthropicProvider implements ModelProvider {
   private readonly thinking: boolean;
   private readonly cache: boolean;
   private readonly serverFallbacks: boolean;
+  private readonly serverTools: readonly Anthropic.ToolUnion[];
 
   constructor(options: AnthropicProviderOptions = {}) {
     this.client = options.client ?? new Anthropic();
@@ -69,16 +78,21 @@ export class AnthropicProvider implements ModelProvider {
     this.thinking = options.thinking ?? true;
     this.cache = options.cache ?? false;
     this.serverFallbacks = options.serverFallbacks ?? false;
+    this.serverTools = options.serverTools ?? [];
   }
 
   async complete(request: ModelRequest): Promise<ModelResponse> {
     try {
+      // Server tools go first so the run's own tools stay at the end of the
+      // list, where the cache breakpoint is: a breakpoint closes a prefix, so
+      // anything after it would be re-sent uncached on every call.
+      const tools = [...this.serverTools, ...(request.tools ? toTools(request.tools, this.cache) : [])];
       const params = {
         model: this.model,
         max_tokens: this.maxTokens,
         ...(request.system !== undefined ? { system: toSystem(request.system, this.cache) } : {}),
         messages: toMessageParams(request.messages),
-        ...(request.tools && request.tools.length > 0 ? { tools: toTools(request.tools, this.cache) } : {}),
+        ...(tools.length > 0 ? { tools } : {}),
         ...(this.thinking ? { thinking: { type: "adaptive" as const } } : {}),
         ...(this.effort ? { output_config: { effort: this.effort } } : {}),
       };
@@ -155,13 +169,24 @@ export function toSystem(system: string, cache = false): string | Anthropic.Text
   return cache ? [{ type: "text", text: system, cache_control: EPHEMERAL }] : system;
 }
 
+/**
+ * The blocks that are deliberately not carried. Thinking is the model's own and
+ * the loop has never acted on it; `fallback` and `compaction` describe the call
+ * rather than the turn, and who answered is already on `message.model`.
+ */
+const DROPPED_BLOCKS = new Set(["thinking", "redacted_thinking", "fallback", "compaction"]);
+
 export function fromMessage(message: Anthropic.Message | Anthropic.Beta.BetaMessage): ModelResponse {
   const content: ModelResponse["content"] = [];
   for (const block of message.content) {
     if (block.type === "text") content.push({ type: "text", text: block.text });
     else if (block.type === "tool_use") content.push({ type: "tool_use", id: block.id, name: block.name, input: block.input });
-    // thinking, redacted_thinking and the fallback block carry nothing the
-    // loop acts on — who answered is already on `message.model`
+    // Everything else is the API's own: a server tool's call, its result, a file
+    // it produced. The loop cannot read them and does not need to, but a paused
+    // turn only resumes if they go back, so they are carried rather than
+    // dropped — and carried by default, since a server tool added after this
+    // release would otherwise go missing quietly.
+    else if (!DROPPED_BLOCKS.has(block.type)) content.push({ type: "server_tool", raw: block });
   }
   return {
     model: message.model,
@@ -182,6 +207,7 @@ function toStopReason(reason: Anthropic.Message["stop_reason"] | Anthropic.Beta.
     case "tool_use":
     case "max_tokens":
     case "refusal":
+    case "pause_turn":
       return reason;
     default:
       return "other";

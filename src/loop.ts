@@ -129,6 +129,14 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       if (response.stopReason === "refusal") return finish("refused");
       if (response.stopReason === "max_tokens") return finish("truncated");
 
+      // A pause is not a stop: the provider interrupted a turn it is still
+      // running server-side, and the turn continues when it is handed back — so
+      // the loop appends nothing and calls again. Any tool_use in a paused turn
+      // belongs to that unfinished turn and is not run here; it arrives for real
+      // when the turn ends. Pauses cost an iteration like any other call, which
+      // is what still bounds a model that only ever pauses.
+      if (response.stopReason === "pause_turn") continue;
+
       const calls = response.content.filter((p): p is ToolUsePart => p.type === "tool_use");
       if (calls.length === 0) return finish("completed");
 

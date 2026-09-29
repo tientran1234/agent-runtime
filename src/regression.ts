@@ -80,6 +80,11 @@ export function renderTranscript(messages: readonly ChatMessage[]): string[] {
           return `tool_use(${part.name})`;
         case "tool_result":
           return `tool_result(${calledTool.get(part.toolUseId) ?? "?"} ${part.isError ? "error" : "ok"})`;
+        // Unnamed, unlike a tool call: the block belongs to the provider, and a
+        // shape that read into it would be asserting a vendor's payload. That a
+        // turn paused, and how many times, is what a prompt edit can move here.
+        case "server_tool":
+          return "server_tool";
       }
     });
     // A refusal or a max_tokens stop can leave a message with no content at
