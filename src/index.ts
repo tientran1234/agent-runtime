@@ -19,6 +19,9 @@ export type { MemoryOptions } from "./memory.js";
 export { Tracer, MemoryExporter, ConsoleExporter } from "./trace.js";
 export type { Run, RunTotals, Span, SpanKind, TraceExporter, TracerOptions } from "./trace.js";
 
+export { renderTranscript } from "./regression.js";
+export type { Scenario, ScenarioReport, ScriptedTurn } from "./regression.js";
+
 export { PRICES, costUsd } from "./pricing.js";
 export type { Price } from "./pricing.js";
 
