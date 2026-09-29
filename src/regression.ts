@@ -1,5 +1,6 @@
-import type { AgentResult, AgentStatus } from "./loop.js";
+import { runAgent, type AgentResult, type AgentStatus } from "./loop.js";
 import type { ConversationMemory } from "./memory.js";
+import { FakeProvider } from "./providers/fake.js";
 import type { BeforeToolCall, ToolDefinition } from "./tools.js";
 import type { ChatMessage, ModelRequest, ModelResponse } from "./types.js";
 
@@ -85,4 +86,108 @@ export function renderTranscript(messages: readonly ChatMessage[]): string[] {
     // all, and an absent line would read as an absent message.
     return `${message.role}: ${parts.length > 0 ? parts.join(" ") : "(empty)"}`;
   });
+}
+
+/**
+ * Run one scenario and report every way it differs from its expectation. It
+ * does not throw on a mismatch — a suite wants all of them at once — but a
+ * provider error from the script still leaves the loop, because that is the
+ * loop's contract and not a shape.
+ */
+export async function runScenario(scenario: Scenario): Promise<ScenarioReport> {
+  // A copy: FakeProvider consumes the script it is given, and a scenario is a
+  // declaration that stays runnable.
+  const provider = new FakeProvider(scenario.script.slice());
+  const memory = scenario.memory?.();
+  const result = await runAgent({
+    provider,
+    input: scenario.input,
+    ...(scenario.system !== undefined ? { system: scenario.system } : {}),
+    ...(scenario.tools ? { tools: scenario.tools } : {}),
+    ...(scenario.maxIterations !== undefined ? { maxIterations: scenario.maxIterations } : {}),
+    ...(scenario.beforeToolCall ? { beforeToolCall: scenario.beforeToolCall } : {}),
+    ...(memory ? { memory } : {}),
+  });
+
+  const transcript = renderTranscript(result.messages);
+  const failures: string[] = [];
+  if (result.status !== scenario.expect.status) {
+    failures.push(`status: expected ${scenario.expect.status}, got ${result.status}`);
+  }
+  if (!same(scenario.expect.transcript, transcript)) {
+    failures.push(`transcript:\n${diff(scenario.expect.transcript, transcript).join("\n")}`);
+  }
+  failures.push(...requestFailures(scenario, provider.calls));
+
+  return { name: scenario.name, ok: failures.length === 0, failures, transcript, result, requests: provider.calls };
+}
+
+/**
+ * `runScenario`, as an assertion. Throws with every mismatch and with the
+ * transcript the run produced, so an intended change is a paste rather than a
+ * second run to find out what the new shape was.
+ */
+export async function assertScenario(scenario: Scenario): Promise<ScenarioReport> {
+  const report = await runScenario(scenario);
+  if (!report.ok) {
+    throw new Error(
+      `scenario ${JSON.stringify(scenario.name)} does not match:\n\n${report.failures.join("\n\n")}\n\n` +
+        `If the change is intended, this is the transcript to expect:\n${report.transcript.map((line) => `  ${JSON.stringify(line)},`).join("\n")}`,
+    );
+  }
+  return report;
+}
+
+/**
+ * What the transcript cannot show. The prompt and the tool list are inputs to
+ * every call rather than messages, so a run that dropped either one still
+ * produces the transcript the scenario expects — and the scenario would be
+ * asserting the loop's shape for a prompt that was never in play.
+ */
+function requestFailures(scenario: Scenario, requests: readonly ModelRequest[]): string[] {
+  const failures: string[] = [];
+  const expected = scenario.tools?.map((tool) => tool.name) ?? [];
+  requests.forEach((request, i) => {
+    if (request.system !== scenario.system) {
+      failures.push(`model call ${i + 1}: expected system prompt ${show(scenario.system)}, got ${show(request.system)}`);
+    }
+    const offered = request.tools?.map((spec) => spec.name) ?? [];
+    if (!same(expected, offered)) {
+      failures.push(`model call ${i + 1}: expected tools [${expected.join(", ")}], got [${offered.join(", ")}]`);
+    }
+  });
+  // An unused turn means the run stopped earlier than whoever wrote the script
+  // thought it would, which the transcript alone will not say if `expect` was
+  // filled in from a previous run's output.
+  if (requests.length < scenario.script.length) {
+    failures.push(`script: ${scenario.script.length} turns scripted, but the run made ${requests.length} model call${requests.length === 1 ? "" : "s"}`);
+  }
+  return failures;
+}
+
+function show(prompt: string | undefined): string {
+  return prompt === undefined ? "none" : JSON.stringify(prompt);
+}
+
+function same(a: readonly string[], b: readonly string[]): boolean {
+  return a.length === b.length && a.every((line, i) => line === b[i]);
+}
+
+/**
+ * Aligned by position rather than matched up: in a transcript a turn that moved
+ * *is* the regression, so the first line that differs is the one to read, and a
+ * matcher that quietly re-paired the rest around it would hide the move.
+ */
+function diff(expected: readonly string[], actual: readonly string[]): string[] {
+  const out: string[] = [];
+  for (let i = 0; i < Math.max(expected.length, actual.length); i++) {
+    const want = expected[i];
+    const got = actual[i];
+    if (want === got) out.push(`  ${want}`);
+    else {
+      if (want !== undefined) out.push(`- ${want}`);
+      if (got !== undefined) out.push(`+ ${got}`);
+    }
+  }
+  return out;
 }
