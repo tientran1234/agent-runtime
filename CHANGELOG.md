@@ -2,6 +2,7 @@
 
 ## 2026-09-29
 
+- Server-side tools (`AnthropicProvider({ serverTools })`) and the `pause_turn` stop condition: a paused turn resumes with its provider blocks carried back verbatim and no client tool run inside it, so a turn of web search or code execution finishes instead of being read as a finished answer.
 - Prompt regression suite: scripted `FakeProvider` scenarios that assert the loop's transcript shape for a given system prompt, runnable in CI, with the prompt and the tool list checked on every model call so a shape that matches for a prompt the model never saw cannot pass.
 
 ## 2026-09-28

@@ -52,6 +52,10 @@ result.usage;    // tokens across every model call
   message. Splitting them across messages quietly trains the model to stop
   parallelising. A tool given `maxConcurrency` queues its own calls without
   holding up any other tool's.
+- **A paused turn is resumed, not answered.** A provider that interrupts its
+  own server-side work stops with `pause_turn`. That is an unfinished turn, so
+  the loop hands it back to be finished, runs no tool inside it, and spends an
+  iteration on it like any other call.
 - **Nothing runs unapproved where a gate is set.** `beforeToolCall` is asked
   about every call and has to answer. A denial — or a gate that throws — becomes
   an error result the model can work around, and the tool never runs.
@@ -216,6 +220,35 @@ sending the tool unstrict, because a silent downgrade breaks the promise
 `.nullable()`, not `.optional()`; Zod still validates every input, strict or
 not.
 
+**Server-side tools belong to the adapter; the pause they cause belongs to the
+loop.** `serverTools` hands the API the tools it runs itself — web search, code
+execution, a hosted MCP server — written the way its own docs write them.
+
+```ts
+const provider = new AnthropicProvider({
+  serverTools: [{ type: "web_search_20250305", name: "web_search", max_uses: 5 }],
+});
+```
+
+None of that reaches `defineTool`: the model calls these inside one turn, this
+runtime never executes one, and they are sent ahead of the run's own tools so
+the cache breakpoint stays at the end of the list, where it closes a prefix.
+What does reach the loop is the stop reason. A long stretch of server-side work
+comes back as `pause_turn`, which is an unfinished turn rather than an answer,
+so the loop calls again with the turn as the last message and nothing appended —
+a user message between the halves would split a turn the API is still inside.
+Nothing runs inside a paused turn: a tool call in one belongs to a turn still in
+progress and arrives for real when it ends. The turn's own blocks travel as
+opaque `server_tool` parts that the loop never reads and the adapter hands back
+byte for byte, because the encrypted search result in there is what lets the
+resumed turn keep the search it already paid for. A block this adapter does not
+recognise is carried rather than dropped, since a server tool released after it
+would otherwise vanish from a resumed turn without a word. What a pause does not
+get is a way out of the bound — it spends an iteration, so `maxIterations` still
+ends a model that only ever pauses. And a server tool's own charge is per
+request, not per token: it is outside `Usage` and outside the run's cost, which
+stay honest about tokens rather than quietly mixing in a number they do not have.
+
 ## Layout
 
 ```
@@ -234,7 +267,7 @@ src/
     anthropic.ts     the only file importing @anthropic-ai/sdk
     openai-compatible.ts  the same port over POST /chat/completions, on fetch
     fake.ts          scripted provider + builders for tests
-tests/               109 tests, no network, no API key
+tests/               119 tests, no network, no API key
 ```
 
 ## SSE
@@ -276,8 +309,6 @@ ANTHROPIC_API_KEY=… node -e '…'   # or `ant auth login`; the SDK picks eithe
 
 ## What is deliberately not here
 
-- **Server-side tools** (web search, code execution). They change the loop's
-  stop conditions (`pause_turn`); wire them at the adapter level when needed.
 - **Persistence of runs.** Traces go to an exporter; where they land is your
   call. Pair with a workflow engine for durable multi-step agents.
 - **A planner or multi-agent orchestration.** This is the runtime one agent

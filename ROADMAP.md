@@ -9,4 +9,5 @@ Backlog for this library. One item per pull request. Items are ordered; take the
 - [x] OpenAI-compatible provider (`providers/openai-compatible.ts`, `fetch`-based, covers Ollama and OpenAI endpoints) implementing `ModelProvider`, with mapping tests like the Anthropic ones.
 - [x] Per-tool concurrency limit and a `beforeToolCall` hook for human approval gates.
 - [x] Prompt regression suite: scripted `FakeProvider` scenarios that assert the loop's transcript shape for a given system prompt, runnable in CI.
+- [x] Server-side tools (`AnthropicProvider({ serverTools })`) and the `pause_turn` stop condition: a paused turn resumes with its provider blocks carried back verbatim, and no client tool runs inside one.
 - [ ] `blocked` Publish as `@tientran1234/agent-runtime` on npm (needs the owner's npm login).
