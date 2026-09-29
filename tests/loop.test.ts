@@ -7,6 +7,7 @@ import {
   Tracer,
   callTools,
   defineTool,
+  paused,
   reply,
   runAgent,
   stoppedWith,
@@ -84,6 +85,41 @@ describe("runAgent", () => {
     expect((await runAgent({ provider: new FakeProvider([cut]), input: "x", tools: [spy] })).status).toBe("truncated");
     expect(ran).toBe(0);
     void stoppedWith;
+  });
+
+  it("resumes a paused turn by sending it straight back, nothing appended", async () => {
+    const block = { type: "server_tool_use", id: "srvtoolu_1", name: "web_search", input: { query: "hanoi" } };
+    const provider = new FakeProvider([paused([block], "Searching…"), reply("It is 22°C.")]);
+    const result = await runAgent({ provider, input: "weather?", tools: [weather] });
+
+    expect(result).toMatchObject({ status: "completed", text: "It is 22°C.", iterations: 2 });
+    // The turn has not ended, so what goes back ends with the assistant message
+    // itself — a user message between the two halves splits a turn the provider
+    // is still inside — and the provider's own block is unchanged.
+    expect(provider.calls[1]!.messages).toEqual([
+      { role: "user", content: [{ type: "text", text: "weather?" }] },
+      { role: "assistant", content: [{ type: "text", text: "Searching…" }, { type: "server_tool", raw: block }] },
+    ]);
+  });
+
+  it("runs no tool inside a paused turn — its calls come back when the turn ends", async () => {
+    let ran = 0;
+    const spy = defineTool({ name: "spy", description: "", input: z.object({}), execute: () => void ran++ });
+    const provider = new FakeProvider([
+      { ...callTools([{ name: "spy", input: {} }]), stopReason: "pause_turn" as const },
+      reply("done"),
+    ]);
+    const result = await runAgent({ provider, input: "x", tools: [spy] });
+
+    expect(result.status).toBe("completed");
+    expect(ran).toBe(0);
+  });
+
+  it("stops at maxIterations when the model only ever pauses", async () => {
+    const provider = new FakeProvider(Array.from({ length: 50 }, () => paused([{ type: "server_tool_use" }])));
+    const result = await runAgent({ provider, input: "x", maxIterations: 3 });
+    expect(result).toMatchObject({ status: "max_iterations", iterations: 3 });
+    expect(provider.calls).toHaveLength(3);
   });
 
   it("honours an abort signal between iterations", async () => {

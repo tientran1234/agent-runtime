@@ -111,11 +111,15 @@ export function toMessageParams(messages: readonly ChatMessage[]): Anthropic.Mes
     if (m.role === "assistant") {
       return {
         role: "assistant",
-        content: m.content.map((p): Anthropic.ContentBlockParam =>
-          p.type === "text"
-            ? { type: "text", text: p.text }
-            : { type: "tool_use", id: p.id, name: p.name, input: p.input },
-        ),
+        content: m.content.map((p): Anthropic.ContentBlockParam => {
+          if (p.type === "text") return { type: "text", text: p.text };
+          if (p.type === "tool_use") return { type: "tool_use", id: p.id, name: p.name, input: p.input };
+          // A block this adapter produced, going back the way it came. The cast
+          // is the whole point of an opaque part: nothing between here and the
+          // API had any business reading it, and a turn the API paused only
+          // resumes if it gets its own bytes back.
+          return p.raw as Anthropic.ContentBlockParam;
+        }),
       };
     }
     return {

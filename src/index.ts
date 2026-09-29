@@ -30,7 +30,7 @@ export type { FallbackOptions } from "./fallback.js";
 
 export { agentSSE } from "./sse.js";
 
-export { FakeProvider, reply, callTools, stoppedWith } from "./providers/fake.js";
+export { FakeProvider, reply, callTools, paused, stoppedWith } from "./providers/fake.js";
 
 export { ProviderError, EMPTY_USAGE, addUsage, textOf } from "./types.js";
 export type {
@@ -39,6 +39,7 @@ export type {
   ModelProvider,
   ModelRequest,
   ModelResponse,
+  ServerToolPart,
   StopReason,
   TextPart,
   ToolResultPart,

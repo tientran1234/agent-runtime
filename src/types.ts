@@ -21,7 +21,18 @@ export interface ToolResultPart {
   isError?: boolean;
 }
 
-export type AssistantPart = TextPart | ToolUsePart;
+/**
+ * A block the provider produced and acted on itself — a server-side tool's call
+ * or its result. The loop never reads `raw`; it carries the block so the adapter
+ * that made it can hand it back, which is what resuming a paused turn takes.
+ */
+export interface ServerToolPart {
+  type: "server_tool";
+  /** The provider's own block, untouched. Only that provider's adapter reads it. */
+  raw: unknown;
+}
+
+export type AssistantPart = TextPart | ToolUsePart | ServerToolPart;
 export type UserPart = TextPart | ToolResultPart;
 
 export type ChatMessage =
@@ -41,7 +52,12 @@ export interface ToolSpec {
   strict?: boolean;
 }
 
-export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "refusal" | "other";
+/**
+ * `pause_turn` is the one stop that is not a stop: the provider interrupted a
+ * turn it was still running server-side, and the turn continues when it is sent
+ * back. Everything a provider reports that is not in this list is `other`.
+ */
+export type StopReason = "end_turn" | "tool_use" | "max_tokens" | "refusal" | "pause_turn" | "other";
 
 export interface Usage {
   inputTokens: number;

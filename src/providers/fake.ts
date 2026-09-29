@@ -56,6 +56,17 @@ export function callTools(calls: Array<{ name: string; input: unknown; id?: stri
   return { model: "", content, stopReason: "tool_use", usage: { ...EMPTY_USAGE, inputTokens: 20, outputTokens: 8 } };
 }
 
+/**
+ * A turn the provider paused while it was still running a server-side tool:
+ * its own blocks, and a stop that means "send this back", not "done".
+ */
+export function paused(blocks: readonly unknown[], text?: string): ModelResponse {
+  const content: AssistantPart[] = [];
+  if (text) content.push({ type: "text", text });
+  for (const raw of blocks) content.push({ type: "server_tool", raw });
+  return { model: "", content, stopReason: "pause_turn", usage: { ...EMPTY_USAGE, inputTokens: 20, outputTokens: 8 } };
+}
+
 export function stoppedWith(stopReason: ModelResponse["stopReason"], text = ""): ModelResponse {
   return { model: "", content: text ? [{ type: "text", text }] : [], stopReason, usage: EMPTY_USAGE };
 }
