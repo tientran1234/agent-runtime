@@ -253,6 +253,75 @@ describe("per-tool concurrency in the loop", () => {
   });
 });
 
+describe("structured final output", () => {
+  const forecast = z.object({ city: z.string(), celsius: z.number() });
+
+  it("parses the final answer and hands it back typed", async () => {
+    const provider = new FakeProvider([reply('{"city":"Hanoi","celsius":22}')]);
+    const result = await runAgent({ provider, input: "weather?", output: forecast });
+    expect(result.status).toBe("completed");
+    expect(result.output).toEqual({ city: "Hanoi", celsius: 22 });
+    // The schema is what the provider is asked to constrain, on every call.
+    expect(provider.calls[0]?.outputSchema).toMatchObject({ type: "object", required: ["city", "celsius"] });
+  });
+
+  it("asks for no schema, and reports no output, when none was wanted", async () => {
+    const provider = new FakeProvider([reply('{"city":"Hanoi","celsius":22}')]);
+    const result = await runAgent({ provider, input: "weather?" });
+    expect(provider.calls[0]).not.toHaveProperty("outputSchema");
+    expect(result).not.toHaveProperty("output");
+  });
+
+  it("feeds a rejected answer back and takes the corrected one", async () => {
+    const provider = new FakeProvider([reply('{"city":"Hanoi","celsius":"warm"}'), reply('{"city":"Hanoi","celsius":22}')]);
+    const result = await runAgent({ provider, input: "weather?", output: forecast });
+    expect(result).toMatchObject({ status: "completed", iterations: 2, output: { city: "Hanoi", celsius: 22 } });
+    // The repair names the field, so the model is not left guessing what missed.
+    expect(provider.calls[1]?.messages.at(-1)).toMatchObject({
+      role: "user",
+      content: [{ type: "text", text: expect.stringContaining("celsius") }],
+    });
+  });
+
+  it("repairs text that is not JSON at all, rather than throwing", async () => {
+    const provider = new FakeProvider([reply("It is 22°C in Hanoi."), reply('{"city":"Hanoi","celsius":22}')]);
+    const result = await runAgent({ provider, input: "weather?", output: forecast });
+    expect(result.output).toEqual({ city: "Hanoi", celsius: 22 });
+    expect(provider.calls[1]?.messages.at(-1)).toMatchObject({
+      content: [{ type: "text", text: expect.stringContaining("not JSON") }],
+    });
+  });
+
+  it("repairs ONCE: a second miss is invalid_output, with no output and no third call", async () => {
+    // Three scripted turns, two of which may be used — a third call would take
+    // the last one and pass, so the count is the assertion that matters.
+    const provider = new FakeProvider([reply("{}"), reply('{"city":"x"}'), reply('{"city":"Hanoi","celsius":22}')]);
+    const result = await runAgent({ provider, input: "weather?", output: forecast });
+    expect(result.status).toBe("invalid_output");
+    expect(result).not.toHaveProperty("output");
+    expect(provider.calls).toHaveLength(2);
+    // The text of the answer that missed is still there to look at.
+    expect(result.text).toBe('{"city":"x"}');
+  });
+
+  it("validates the answer that follows a tool call, not the tool turn", async () => {
+    const provider = new FakeProvider([
+      callTools([{ name: "get_weather", input: { city: "Hanoi" }, id: "t1" }]),
+      reply('{"city":"Hanoi","celsius":22}'),
+    ]);
+    const result = await runAgent({ provider, input: "weather?", tools: [weather], output: forecast });
+    expect(result).toMatchObject({ status: "completed", iterations: 2, output: { city: "Hanoi", celsius: 22 } });
+    expect(provider.calls.every((call) => call.outputSchema !== undefined)).toBe(true);
+  });
+
+  it("does not let the repair round outrun maxIterations", async () => {
+    const provider = new FakeProvider([reply("{}"), reply('{"city":"Hanoi","celsius":22}')]);
+    const result = await runAgent({ provider, input: "weather?", output: forecast, maxIterations: 1 });
+    expect(result.status).toBe("max_iterations");
+    expect(provider.calls).toHaveLength(1);
+  });
+});
+
 describe("approval gates in the loop", () => {
   const deleteAccount = (onRun: () => void) =>
     defineTool({ name: "delete_account", description: "Delete an account", input: z.object({ id: z.string() }), execute: onRun });

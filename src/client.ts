@@ -52,11 +52,13 @@ const FRAME_END = /\r\n\r\n|\n\n|\r\r/;
 export async function readAgentSSE(
   response: Response,
   handlers: AgentSSEHandlers = {},
-): Promise<AgentResult | undefined> {
+  // `unknown` output, not the caller's schema: over the wire it is whatever the
+  // server validated, and this side has no schema to check that claim against.
+): Promise<AgentResult<unknown> | undefined> {
   if (!response.ok) throw new AgentSSEError(`agent stream failed: HTTP ${response.status}`);
   if (!response.body) throw new AgentSSEError("agent stream has no body");
 
-  let result: AgentResult | undefined;
+  let result: AgentResult<unknown> | undefined;
   let failure: AgentErrorEvent | undefined;
 
   const dispatch = (frame: string): void => {

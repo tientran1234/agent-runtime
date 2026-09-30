@@ -1,5 +1,7 @@
+import type { z } from "zod";
 import { executeTool, semaphore, toToolSpec, type BeforeToolCall, type Limit, type ToolContext, type ToolDefinition } from "./tools.js";
 import type { ConversationMemory } from "./memory.js";
+import { parseOutput, repairRequest, toOutputSchema } from "./output.js";
 import type { Run, Tracer } from "./trace.js";
 import {
   EMPTY_USAGE,
@@ -18,11 +20,12 @@ export type AgentEvent =
   | { type: "model_call"; iteration: number; response: ModelResponse }
   | { type: "tool_call"; id: string; name: string; input: unknown }
   | { type: "tool_result"; id: string; name: string; content: string; isError: boolean; durationMs: number }
-  | { type: "done"; result: AgentResult };
+  // Widest result, so one event type covers a run of any output schema.
+  | { type: "done"; result: AgentResult<unknown> };
 
-export type AgentStatus = "completed" | "max_iterations" | "refused" | "truncated" | "aborted";
+export type AgentStatus = "completed" | "max_iterations" | "refused" | "truncated" | "aborted" | "invalid_output";
 
-export interface AgentResult {
+export interface AgentResult<Output = never> {
   status: AgentStatus;
   /** Text of the final assistant message. */
   text: string;
@@ -31,9 +34,15 @@ export interface AgentResult {
   iterations: number;
   usage: Usage;
   trace?: Run;
+  /**
+   * The final message parsed by the `output` schema. Set only on
+   * `status: "completed"` of a run that asked for one — `never` otherwise, so
+   * reading it without having asked is a type error rather than a surprise.
+   */
+  output?: Output;
 }
 
-export interface AgentOptions {
+export interface AgentOptions<S extends z.ZodType = z.ZodNever> {
   provider: ModelProvider;
   /** A string becomes the first user message. */
   input: string | ChatMessage[];
@@ -54,6 +63,14 @@ export interface AgentOptions {
    * as well to stop there.
    */
   beforeToolCall?: BeforeToolCall;
+  /**
+   * Schema the final answer has to match. The loop sends it to the provider to
+   * constrain, validates what comes back, and gives the model one more turn
+   * with the validation error if it does not fit. A second miss is
+   * `status: "invalid_output"` — `result.output` is a parsed value or nothing,
+   * never an unchecked one.
+   */
+  output?: S;
 }
 
 /**
@@ -61,7 +78,9 @@ export interface AgentOptions {
  * tools or something says stop. Every stop condition is a named status, not
  * an exception, so the caller can tell "done" from "gave up" from "refused".
  */
-export async function runAgent(options: AgentOptions): Promise<AgentResult> {
+export async function runAgent<S extends z.ZodType = z.ZodNever>(
+  options: AgentOptions<S>,
+): Promise<AgentResult<z.output<S>>> {
   const tools = options.tools ?? [];
   const byName = new Map(tools.map((t) => [t.name, t]));
   const specs = tools.length > 0 ? tools.map(toToolSpec) : undefined;
@@ -74,6 +93,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   for (const tool of tools) {
     if (Number.isFinite(tool.maxConcurrency)) limits.set(tool.name, semaphore(tool.maxConcurrency));
   }
+  const outputSchema = options.output ? toOutputSchema(options.output) : undefined;
 
   const transcript: ChatMessage[] =
     typeof options.input === "string"
@@ -84,12 +104,22 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
   const run = options.tracer?.startRun(options.runName ?? "agent", { provider: options.provider.name, model: options.provider.model });
   let usage = EMPTY_USAGE;
   let iterations = 0;
+  let output: { value: z.output<S> } | undefined;
+  let repaired = false;
 
-  const finish = async (status: AgentStatus, error?: unknown): Promise<AgentResult> => {
+  const finish = async (status: AgentStatus, error?: unknown): Promise<AgentResult<z.output<S>>> => {
     const last = transcript[transcript.length - 1];
     const text = last?.role === "assistant" ? textOf(last.content) : "";
     const trace = run ? await run.end(error) : undefined;
-    const result: AgentResult = { status, text, messages: transcript, iterations, usage, ...(trace ? { trace } : {}) };
+    const result: AgentResult<z.output<S>> = {
+      status,
+      text,
+      messages: transcript,
+      iterations,
+      usage,
+      ...(trace ? { trace } : {}),
+      ...(output ? { output: output.value } : {}),
+    };
     emit({ type: "done", result });
     return result;
   };
@@ -109,6 +139,7 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
           ...(options.system !== undefined ? { system: options.system } : {}),
           messages,
           ...(specs ? { tools: specs } : {}),
+          ...(outputSchema ? { outputSchema } : {}),
           ...(options.signal ? { signal: options.signal } : {}),
           onTextDelta: (text) => emit({ type: "text_delta", text }),
         });
@@ -138,7 +169,25 @@ export async function runAgent(options: AgentOptions): Promise<AgentResult> {
       if (response.stopReason === "pause_turn") continue;
 
       const calls = response.content.filter((p): p is ToolUsePart => p.type === "tool_use");
-      if (calls.length === 0) return finish("completed");
+      if (calls.length === 0) {
+        if (!options.output) return finish("completed");
+        const parsed = parseOutput(options.output, textOf(assistant.content));
+        if (parsed.ok) {
+          output = { value: parsed.value };
+          return finish("completed");
+        }
+        // One repair round, not a loop: a model that missed the schema twice is
+        // not going to be talked into it, and every further try is another bill
+        // against an answer the caller cannot use. The miss is fed back as a
+        // user message so the model sees what was wrong with what it sent, and
+        // it costs an iteration like any other turn.
+        if (repaired) return finish("invalid_output");
+        repaired = true;
+        const repair: ChatMessage = { role: "user", content: [{ type: "text", text: repairRequest(parsed.problem) }] };
+        transcript.push(repair);
+        options.memory?.append(repair);
+        continue;
+      }
 
       // All tool calls from one turn run concurrently, and ALL their results go
       // back in ONE user message. Splitting them across messages teaches the
