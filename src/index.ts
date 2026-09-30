@@ -13,6 +13,9 @@ export type {
   ToolOutcome,
 } from "./tools.js";
 
+export { parseOutput, repairRequest, toOutputSchema } from "./output.js";
+export type { OutputParse } from "./output.js";
+
 export { ConversationMemory, splitTurns } from "./memory.js";
 export type { MemoryOptions } from "./memory.js";
 

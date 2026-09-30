@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it } from "vitest";
-import { AnthropicProvider, SERVER_FALLBACK_BETA, fromMessage, toMessageParams, toProviderError, toSystem, toTools } from "../src/providers/anthropic.js";
+import { AnthropicProvider, SERVER_FALLBACK_BETA, fromMessage, toMessageParams, toOutputConfig, toProviderError, toSystem, toTools } from "../src/providers/anthropic.js";
 import type { AnthropicProviderOptions } from "../src/providers/anthropic.js";
 import { ProviderError } from "../src/index.js";
 import type { ToolSpec } from "../src/index.js";
@@ -203,6 +203,43 @@ describe("server-side refusal fallbacks", () => {
     // Cost is looked up per span on this field, so it has to be the substitute.
     expect(out.model).toBe("claude-opus-4-8");
     expect(out.content).toEqual([{ type: "text", text: "ok" }]);
+  });
+});
+
+describe("structured final output", () => {
+  const schema = { type: "object", properties: { answer: { type: "number" } }, required: ["answer"], additionalProperties: false };
+
+  /** One request through the stub, so what `output_config` ends up as can be read off it. */
+  async function send(options: AnthropicProviderOptions = {}, outputSchema?: Record<string, unknown>) {
+    let params: SentParams | undefined;
+    const provider = new AnthropicProvider({ ...options, client: stubClient((sent) => (params = sent)) });
+    await provider.complete({
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      ...(outputSchema ? { outputSchema } : {}),
+    });
+    return params!;
+  }
+
+  it("sends no output_config at all when neither effort nor a schema was asked for", async () => {
+    expect(toOutputConfig()).toBeUndefined();
+    expect(await send()).not.toHaveProperty("output_config");
+  });
+
+  it("puts the schema on output_config.format as a json_schema", async () => {
+    expect((await send({}, schema)).output_config).toEqual({ format: { type: "json_schema", schema } });
+  });
+
+  it("keeps effort and the format together, since one field carries both", async () => {
+    expect((await send({ effort: "high" }, schema)).output_config).toEqual({
+      effort: "high",
+      format: { type: "json_schema", schema },
+    });
+    expect((await send({ effort: "high" })).output_config).toEqual({ effort: "high" });
+  });
+
+  it("passes the schema through untouched — the loop decides what it contains", () => {
+    const nested = { type: "object", properties: { a: { $ref: "#/$defs/x" } }, $defs: { x: { type: "string" } } };
+    expect(toOutputConfig(undefined, nested)?.format?.schema).toBe(nested);
   });
 });
 

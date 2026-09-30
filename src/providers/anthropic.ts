@@ -87,6 +87,9 @@ export class AnthropicProvider implements ModelProvider {
       // list, where the cache breakpoint is: a breakpoint closes a prefix, so
       // anything after it would be re-sent uncached on every call.
       const tools = [...this.serverTools, ...(request.tools ? toTools(request.tools, this.cache) : [])];
+      // Effort and the output format share one field, so they are built together
+      // — set apart, whichever came second would drop the other.
+      const outputConfig = toOutputConfig(this.effort, request.outputSchema);
       const params = {
         model: this.model,
         max_tokens: this.maxTokens,
@@ -94,7 +97,7 @@ export class AnthropicProvider implements ModelProvider {
         messages: toMessageParams(request.messages),
         ...(tools.length > 0 ? { tools } : {}),
         ...(this.thinking ? { thinking: { type: "adaptive" as const } } : {}),
-        ...(this.effort ? { output_config: { effort: this.effort } } : {}),
+        ...(outputConfig ? { output_config: outputConfig } : {}),
       };
       const options = request.signal ? { signal: request.signal } : undefined;
       // Always stream: a long answer then cannot hit the HTTP timeout, and
@@ -162,6 +165,21 @@ export function toTools(tools: readonly ToolSpec[], cache = false): Anthropic.To
     ...(t.strict ? { strict: true } : {}),
     ...(cache && i === tools.length - 1 ? { cache_control: EPHEMERAL } : {}),
   }));
+}
+
+/**
+ * Effort and the format the answer must take, or nothing when neither was asked
+ * for: an empty `output_config` is a field the request is better off without.
+ * The schema goes over as a JSON Schema the API constrains decoding to, which
+ * is a stronger promise than a prompt asking for JSON — and one the loop still
+ * checks, since a constrained decode is not a validated value.
+ */
+export function toOutputConfig(effort?: Effort, outputSchema?: Record<string, unknown>): Anthropic.OutputConfig | undefined {
+  if (!effort && !outputSchema) return undefined;
+  return {
+    ...(effort ? { effort } : {}),
+    ...(outputSchema ? { format: { type: "json_schema" as const, schema: outputSchema } } : {}),
+  };
 }
 
 /** A plain string unless it is being cached — `cache_control` lives on blocks. */

@@ -78,6 +78,13 @@ export interface ModelRequest {
   system?: string;
   messages: ChatMessage[];
   tools?: ToolSpec[];
+  /**
+   * JSON Schema the final message has to match, for a provider that can
+   * constrain its decoding to it. It is a request, not the guarantee: what the
+   * caller is promised comes from the loop validating the answer, so an adapter
+   * with nothing to map this to may ignore it.
+   */
+  outputSchema?: Record<string, unknown>;
   signal?: AbortSignal;
   /** Called with each text chunk as it streams. Optional: providers may stream regardless. */
   onTextDelta?: (text: string) => void;
