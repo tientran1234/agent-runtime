@@ -11,3 +11,14 @@ Backlog for this library. One item per pull request. Items are ordered; take the
 - [x] Prompt regression suite: scripted `FakeProvider` scenarios that assert the loop's transcript shape for a given system prompt, runnable in CI.
 - [x] Server-side tools (`AnthropicProvider({ serverTools })`) and the `pause_turn` stop condition: a paused turn resumes with its provider blocks carried back verbatim, and no client tool runs inside one.
 - [ ] `blocked` Publish as `@tientran1234/agent-runtime` on npm (needs the owner's npm login).
+
+## Batch 2 — set by the owner, 30 Sep 2026
+
+Same rule: one item per change, in order.
+
+- [ ] Structured final output: `runAgent({ output: zodSchema })` uses structured outputs (`output_config.format`) on the Anthropic adapter, validates the final message, retries once with the validation error fed back; `result.output` is typed.
+- [ ] Budget guard: `maxCostUsd` / `maxInputTokens` per run — stop with status `budget_exceeded` before the call that would exceed, using the tracer's running totals; tested against the fake provider's scripted usage.
+- [ ] Resumable runs: serialize loop state (transcript, iteration, pending approval) so a run paused by `beforeToolCall → "ask"` resumes in another process; an example hosting a run inside a durable-workflow step.
+- [ ] Sub-agent handoff: `handoffTool({ name, description, ...AgentOptions })` — a tool that runs a nested agent with its own provider and tools and returns its final text; nested spans under the parent trace with cost rolled up.
+- [ ] Context editing: opt-in `contextEditing: { clearToolUsesAfter: N }` — on the Anthropic adapter via `context_management`, and an equivalent in-memory strategy for other providers; test that old tool results disappear from the request while the transcript stays intact.
+- [ ] OpenTelemetry exporter: `OtelExporter({ endpoint })` mapping runs and spans to OTLP/HTTP JSON so traces land in Tempo or Jaeger; span attributes for model, tokens, cost, tool name.
