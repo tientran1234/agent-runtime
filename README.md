@@ -29,7 +29,7 @@ const result = await runAgent({
   tracer: new Tracer({ exporters: [new ConsoleExporter()] }),
 });
 
-result.status;   // "completed" | "max_iterations" | "refused" | "truncated" | "aborted"
+result.status;   // "completed" | "max_iterations" | "refused" | "truncated" | "aborted" | "invalid_output"
 result.text;     // the final answer
 result.usage;    // tokens across every model call
 ```
@@ -56,6 +56,11 @@ result.usage;    // tokens across every model call
   own server-side work stops with `pause_turn`. That is an unfinished turn, so
   the loop hands it back to be finished, runs no tool inside it, and spends an
   iteration on it like any other call.
+- **A structured answer is validated, never assumed.** Given
+  `output: zodSchema`, `result.output` is a value that schema accepted — the
+  final message is parsed here rather than taken on the provider's word. One
+  miss buys a repair turn with the validation error fed back; a second is
+  `status: "invalid_output"`.
 - **Nothing runs unapproved where a gate is set.** `beforeToolCall` is asked
   about every call and has to answer. A denial — or a gate that throws — becomes
   an error result the model can work around, and the tool never runs.
@@ -220,6 +225,37 @@ sending the tool unstrict, because a silent downgrade breaks the promise
 `.nullable()`, not `.optional()`; Zod still validates every input, strict or
 not.
 
+**A structured answer is asked for and then checked anyway.**
+`runAgent({ output: zodSchema })` sends the schema on as JSON Schema —
+`output_config.format` on the Anthropic adapter, where decoding is constrained
+to it — and `result.output` comes back parsed and typed off that schema.
+
+```ts
+const result = await runAgent({
+  provider,
+  input: "How hot is it in Hanoi?",
+  output: z.object({ city: z.string(), celsius: z.number() }),
+});
+
+result.output;   // { city: string; celsius: number } | undefined
+```
+
+The check is not redundant with the ask. `outputSchema` is a request a provider
+may have nothing to map, and a constrained decode is still not a validated
+value, so the loop parses the final message itself and sets `output` only once
+the schema has accepted it — which is also what makes the option work unchanged
+on an adapter that cannot ask for it. A miss gets the model one more turn with
+the validation error fed back, naming the field that was wrong, because a bare
+"try again" is how a model repeats itself. One turn, not a loop: a model that
+missed twice will not be talked into it, and each further try bills for an
+answer the caller cannot use — so a second miss is `status: "invalid_output"`,
+with `result.text` still carrying what came back to look at. The repair spends
+an iteration like any other turn, so `maxIterations` still ends the run. Text
+that is not JSON at all takes the same path as JSON the schema rejects: both are
+something for the model to fix, not an exception for the caller. Without an
+`output` schema `result.output` is `never`, so reading it on a run that asked
+for nothing is a type error rather than a surprise.
+
 **Server-side tools belong to the adapter; the pause they cause belongs to the
 loop.** `serverTools` hands the API the tools it runs itself — web search, code
 execution, a hosted MCP server — written the way its own docs write them.
@@ -256,6 +292,7 @@ src/
   types.ts           neutral messages, tool specs, ModelProvider port, ProviderError
   tools.ts           defineTool (Zod) · executeTool: validate → approve → limit → timeout → truncate
   loop.ts            runAgent — the bounded loop, events, statuses
+  output.ts          the output schema: JSON Schema out, the final answer parsed back
   memory.ts          ConversationMemory: token budget, turn-wise trimming, summariser hook
   trace.ts           Tracer / runs / spans, usage + cost, Memory and Console exporters
   pricing.ts         per-model prices, costUsd()
@@ -267,7 +304,7 @@ src/
     anthropic.ts     the only file importing @anthropic-ai/sdk
     openai-compatible.ts  the same port over POST /chat/completions, on fetch
     fake.ts          scripted provider + builders for tests
-tests/               119 tests, no network, no API key
+tests/               136 tests, no network, no API key
 ```
 
 ## SSE

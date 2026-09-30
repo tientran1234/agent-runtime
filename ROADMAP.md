@@ -16,7 +16,7 @@ Backlog for this library. One item per pull request. Items are ordered; take the
 
 Same rule: one item per change, in order.
 
-- [ ] Structured final output: `runAgent({ output: zodSchema })` uses structured outputs (`output_config.format`) on the Anthropic adapter, validates the final message, retries once with the validation error fed back; `result.output` is typed.
+- [x] Structured final output: `runAgent({ output: zodSchema })` uses structured outputs (`output_config.format`) on the Anthropic adapter, validates the final message, retries once with the validation error fed back; `result.output` is typed.
 - [ ] Budget guard: `maxCostUsd` / `maxInputTokens` per run — stop with status `budget_exceeded` before the call that would exceed, using the tracer's running totals; tested against the fake provider's scripted usage.
 - [ ] Resumable runs: serialize loop state (transcript, iteration, pending approval) so a run paused by `beforeToolCall → "ask"` resumes in another process; an example hosting a run inside a durable-workflow step.
 - [ ] Sub-agent handoff: `handoffTool({ name, description, ...AgentOptions })` — a tool that runs a nested agent with its own provider and tools and returns its final text; nested spans under the parent trace with cost rolled up.

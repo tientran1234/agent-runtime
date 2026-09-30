@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-09-30
+
+- Structured final output: `runAgent({ output: zodSchema })` uses structured outputs (`output_config.format`) on the Anthropic adapter, validates the final message, and retries once with the validation error fed back, so `result.output` is a typed value the schema accepted rather than the provider's word for one.
+
 ## 2026-09-29
 
 - Server-side tools (`AnthropicProvider({ serverTools })`) and the `pause_turn` stop condition: a paused turn resumes with its provider blocks carried back verbatim and no client tool run inside it, so a turn of web search or code execution finishes instead of being read as a finished answer.
