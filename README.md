@@ -29,7 +29,7 @@ const result = await runAgent({
   tracer: new Tracer({ exporters: [new ConsoleExporter()] }),
 });
 
-result.status;   // "completed" | "max_iterations" | "refused" | "truncated" | "aborted" | "invalid_output"
+result.status;   // "completed" | "max_iterations" | "refused" | "truncated" | "aborted" | "invalid_output" | "budget_exceeded"
 result.text;     // the final answer
 result.usage;    // tokens across every model call
 ```
@@ -38,6 +38,10 @@ result.usage;    // tokens across every model call
 
 - **It ends.** `maxIterations` caps model calls. A model that never stops
   calling tools gets `status: "max_iterations"`, not an infinite bill.
+- **It ends inside a budget, if you set one.** `maxCostUsd` and
+  `maxInputTokens` are totals for the run, checked before each call rather than
+  reported after it: the loop stops with `status: "budget_exceeded"` on the
+  first call it can show would go over.
 - **No tool runs on bad input.** Every tool input is validated against its Zod
   schema first. Invalid input becomes an *error result* the model can read and
   correct — not an exception, and not a side effect on garbage.
@@ -185,6 +189,38 @@ usage and looks up the price for the model that actually answered (which
 matters once fallback is involved). A model missing from the price table makes
 the run's total `null`, not a quietly smaller number.
 
+**A budget is checked before the call, which means forecasting it.**
+`maxCostUsd` and `maxInputTokens` cap the whole run, and the cap is asked about
+at the one moment a call can still be not made.
+
+```ts
+const result = await runAgent({ provider, input, tools, maxCostUsd: 0.5 });
+result.status;            // "budget_exceeded" once the next call would pass $0.50
+result.trace?.attributes; // { budget: "maxCostUsd $0.50000: $0.49210 spent, …" }
+```
+
+Judging a call that has not happened takes a forecast, and the forecast is the
+last call's own usage: the loop appends to the transcript, so the next call
+sends at least what the last one did and costs at least as much. That keeps the
+guard sound rather than merely cautious — it fires only where the overrun is
+already provable, never on a call that would have fit. The first call of a run
+is therefore never the one stopped: nothing has been measured, and a budget that
+could refuse to start would be one nobody could set. What no forecast can do is
+make the cap a hard ceiling, because how long an answer runs is not knowable
+before asking for it — a run can overshoot by up to one call's worth, which is
+the honest bound and still the difference between a capped tool loop and an open
+tab. The totals are the tracer's, priced off the tracer's own table so a
+deployment's rates bind the budget too, and kept in the ledger so that setting a
+cap does not oblige you to attach a tracer. The same rule that makes an unknown
+price `null` there decides what happens here: a model missing from the price
+table makes the spend unmeasurable, and an unmeasurable `maxCostUsd` ends the
+run with the same status rather than being quietly spent through, because a cap
+nobody can check is not a cap. `maxInputTokens` counts cache reads and writes
+along with plain input — they are tokens the model was given, whatever rate they
+were billed at. Which limit fired and what had been spent against it go on the
+run, not into the result: the status is what you branch on, the numbers are what
+you read when deciding to raise the cap.
+
 **Fallback keys on the provider's verdict, not on status codes.** Rate limits,
 overload and network errors are retryable and move to the next provider; a
 400 is thrown as-is, because it will be a 400 everywhere. `response.model`
@@ -293,6 +329,7 @@ src/
   tools.ts           defineTool (Zod) · executeTool: validate → approve → limit → timeout → truncate
   loop.ts            runAgent — the bounded loop, events, statuses
   output.ts          the output schema: JSON Schema out, the final answer parsed back
+  budget.ts          BudgetLedger: what a run has spent, and whether the next call fits
   memory.ts          ConversationMemory: token budget, turn-wise trimming, summariser hook
   trace.ts           Tracer / runs / spans, usage + cost, Memory and Console exporters
   pricing.ts         per-model prices, costUsd()
@@ -304,7 +341,7 @@ src/
     anthropic.ts     the only file importing @anthropic-ai/sdk
     openai-compatible.ts  the same port over POST /chat/completions, on fetch
     fake.ts          scripted provider + builders for tests
-tests/               136 tests, no network, no API key
+tests/               144 tests, no network, no API key
 ```
 
 ## SSE

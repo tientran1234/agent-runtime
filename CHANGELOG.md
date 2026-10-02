@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-02
+
+- Budget guard: `maxCostUsd` / `maxInputTokens` per run — the loop stops with status `budget_exceeded` before the call that would exceed, forecasting it from the last call against the tracer's running totals, so a cap bounds a run to within one call instead of reporting the overrun afterwards.
+
 ## 2026-09-30
 
 - Structured final output: `runAgent({ output: zodSchema })` uses structured outputs (`output_config.format`) on the Anthropic adapter, validates the final message, and retries once with the validation error fed back, so `result.output` is a typed value the schema accepted rather than the provider's word for one.
