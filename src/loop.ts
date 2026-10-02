@@ -1,6 +1,6 @@
 import type { z } from "zod";
 import { executeTool, semaphore, toToolSpec, type BeforeToolCall, type Limit, type ToolContext, type ToolDefinition } from "./tools.js";
-import type { BudgetOptions } from "./budget.js";
+import { BudgetLedger, type BudgetOptions } from "./budget.js";
 import type { ConversationMemory } from "./memory.js";
 import { parseOutput, repairRequest, toOutputSchema } from "./output.js";
 import type { Run, Tracer } from "./trace.js";
@@ -95,6 +95,13 @@ export async function runAgent<S extends z.ZodType = z.ZodNever>(
     if (Number.isFinite(tool.maxConcurrency)) limits.set(tool.name, semaphore(tool.maxConcurrency));
   }
   const outputSchema = options.output ? toOutputSchema(options.output) : undefined;
+  // Only when a cap was asked for: an unbudgeted run should not pay to be
+  // measured. The tracer's price table is what the cap is priced against, so a
+  // deployment's own rates bind the budget as well as the trace.
+  const budget =
+    options.maxCostUsd !== undefined || options.maxInputTokens !== undefined
+      ? new BudgetLedger(options, options.tracer?.prices)
+      : undefined;
 
   const transcript: ChatMessage[] =
     typeof options.input === "string"
@@ -128,6 +135,16 @@ export async function runAgent<S extends z.ZodType = z.ZodNever>(
   try {
     while (iterations < maxIterations) {
       if (options.signal?.aborted) return finish("aborted");
+
+      // Asked here, where the call can still be not made — a cap enforced after
+      // the fact is a report, not a budget. The reason goes on the run because
+      // the status says only that a limit was hit, and which one, with what
+      // spent against it, is what a caller raising the cap needs.
+      const overBudget = budget?.wouldExceed();
+      if (overBudget !== undefined) {
+        run?.setAttributes({ budget: overBudget });
+        return finish("budget_exceeded");
+      }
       iterations++;
 
       // A snapshot, so a provider that keeps the request (a fake, a logger)
@@ -150,6 +167,7 @@ export async function runAgent<S extends z.ZodType = z.ZodNever>(
       }
       span?.recordUsage(response.model, response.usage).setAttributes({ stopReason: response.stopReason }).end();
       usage = addUsage(usage, response.usage);
+      budget?.record(response);
       emit({ type: "model_call", iteration: iterations, response });
 
       const assistant: ChatMessage = { role: "assistant", content: response.content };

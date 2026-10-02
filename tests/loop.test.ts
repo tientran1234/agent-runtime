@@ -471,8 +471,11 @@ describe("budget guard in the loop", () => {
   it("stops a cost cap it cannot measure, rather than spending past it in silence", async () => {
     const exporter = new MemoryExporter();
     const tracer = new Tracer({ exporters: [exporter] });
-    const provider = new FakeProvider([reply("one"), reply("two")], "mystery-model-9");
-    const result = await runAgent({ provider, input: "x", tracer, maxCostUsd: 100 });
+    const provider = new FakeProvider(
+      [callTools([{ name: "get_weather", input: { city: "A" } }]), reply("done")],
+      "mystery-model-9",
+    );
+    const result = await runAgent({ provider, input: "x", tools: [weather], tracer, maxCostUsd: 100 });
 
     expect(result).toMatchObject({ status: "budget_exceeded", iterations: 1 });
     expect(provider.calls).toHaveLength(1);

@@ -123,6 +123,11 @@ export class RunHandle {
     return this.run.id;
   }
 
+  setAttributes(attributes: Record<string, unknown>): this {
+    Object.assign(this.run.attributes, attributes);
+    return this;
+  }
+
   startSpan(kind: SpanKind, name: string, attributes: Record<string, unknown> = {}): SpanHandle {
     const span: Span = { id: randomUUID(), runId: this.run.id, kind, name, startedAt: this.tracer.now(), attributes };
     this.run.spans.push(span);
