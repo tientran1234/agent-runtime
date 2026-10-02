@@ -403,3 +403,99 @@ describe("approval gates in the loop", () => {
     expect((await run).status).toBe("completed");
   });
 });
+
+describe("budget guard in the loop", () => {
+  // `callTools` sends 20 in / 8 out, `reply` 10 in / 5 out; at claude-opus-5's
+  // $5/M in and $25/M out that is $0.0003 and $0.000175 a call.
+  const perToolTurn = 20 * 5e-6 + 8 * 25e-6;
+
+  it("stops before the call that would take maxCostUsd over, not after it", async () => {
+    const provider = new FakeProvider(
+      [callTools([{ name: "get_weather", input: { city: "A" } }]), callTools([{ name: "get_weather", input: { city: "B" } }]), reply("done")],
+      "claude-opus-5",
+    );
+    // Two turns fit ($0.0006); a third would reach $0.0009, so the loop never asks for it.
+    const result = await runAgent({ provider, input: "x", tools: [weather], maxCostUsd: perToolTurn * 2.5 });
+
+    expect(result).toMatchObject({ status: "budget_exceeded", iterations: 2 });
+    expect(provider.calls).toHaveLength(2);
+  });
+
+  it("counts cached tokens against maxInputTokens — they are tokens the model was given", async () => {
+    const provider = new FakeProvider(
+      [
+        { ...callTools([{ name: "get_weather", input: { city: "A" } }]), usage: { inputTokens: 20, outputTokens: 8, cacheReadTokens: 0, cacheWriteTokens: 0 } },
+        { ...callTools([{ name: "get_weather", input: { city: "B" } }]), usage: { inputTokens: 10, outputTokens: 8, cacheReadTokens: 100, cacheWriteTokens: 0 } },
+        reply("done"),
+      ],
+      "claude-opus-5",
+    );
+    // 20 then 110 tokens in. Counting only the uncached 20 + 10 would leave the
+    // third call well inside the cap; counting what was really sent does not.
+    const result = await runAgent({ provider, input: "x", tools: [weather], maxInputTokens: 150 });
+
+    expect(result).toMatchObject({ status: "budget_exceeded", iterations: 2 });
+    expect(provider.calls).toHaveLength(2);
+  });
+
+  it("never stops the first call: a budget has nothing to forecast from yet", async () => {
+    const provider = new FakeProvider([reply("Hello!")], "claude-opus-5");
+    const result = await runAgent({ provider, input: "hi", maxCostUsd: 1e-9, maxInputTokens: 1 });
+    expect(result).toMatchObject({ status: "completed", text: "Hello!", iterations: 1 });
+  });
+
+  it("leaves a run that fits alone", async () => {
+    const provider = new FakeProvider([callTools([{ name: "get_weather", input: { city: "A" } }]), reply("done")], "claude-opus-5");
+    const result = await runAgent({ provider, input: "x", tools: [weather], maxCostUsd: 1, maxInputTokens: 10_000 });
+    expect(result).toMatchObject({ status: "completed", iterations: 2 });
+  });
+
+  it("measures the run against the tracer's totals, and records which limit stopped it", async () => {
+    const exporter = new MemoryExporter();
+    const tracer = new Tracer({ exporters: [exporter], now: () => 1000 });
+    const provider = new FakeProvider(
+      [callTools([{ name: "get_weather", input: { city: "A" } }]), callTools([{ name: "get_weather", input: { city: "B" } }]), reply("done")],
+      "claude-opus-5",
+    );
+    const result = await runAgent({ provider, input: "x", tools: [weather], tracer, maxCostUsd: perToolTurn * 2.5 });
+
+    expect(result.status).toBe("budget_exceeded");
+    const run = exporter.runs[0]!;
+    // What the guard spent is what the trace says it spent — one set of numbers.
+    expect(run.totals.costUsd).toBeCloseTo(perToolTurn * 2, 9);
+    expect(run.attributes.budget).toMatch(/^maxCostUsd \$0\.00075: \$0\.00060 spent/);
+    // The run itself ended cleanly: a budget stop is a decision, not a failure.
+    expect(run.status).toBe("ok");
+  });
+
+  it("stops a cost cap it cannot measure, rather than spending past it in silence", async () => {
+    const exporter = new MemoryExporter();
+    const tracer = new Tracer({ exporters: [exporter] });
+    const provider = new FakeProvider([reply("one"), reply("two")], "mystery-model-9");
+    const result = await runAgent({ provider, input: "x", tracer, maxCostUsd: 100 });
+
+    expect(result).toMatchObject({ status: "budget_exceeded", iterations: 1 });
+    expect(provider.calls).toHaveLength(1);
+    expect(exporter.runs[0]!.totals.costUsd).toBeNull();
+    expect(exporter.runs[0]!.attributes.budget).toContain("no price for mystery-model-9");
+  });
+
+  it("prices the budget off the tracer's table, so a deployment's own rates are the cap", async () => {
+    const tracer = new Tracer({ prices: { "claude-opus-5": { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0 } } });
+    const provider = new FakeProvider(
+      [callTools([{ name: "get_weather", input: { city: "A" } }]), callTools([{ name: "get_weather", input: { city: "B" } }]), reply("done")],
+      "claude-opus-5",
+    );
+    // $1 per input token under this table: two turns cost $40, a third would reach $60.
+    const result = await runAgent({ provider, input: "x", tools: [weather], tracer, maxCostUsd: 50 });
+
+    expect(result).toMatchObject({ status: "budget_exceeded", iterations: 2 });
+  });
+
+  it("guards a run with no tracer attached at all", async () => {
+    const provider = new FakeProvider(Array.from({ length: 10 }, () => callTools([{ name: "get_weather", input: { city: "X" } }])), "claude-opus-5");
+    const result = await runAgent({ provider, input: "x", tools: [weather], maxInputTokens: 55 });
+    // 20 tokens a call: the third would reach 60.
+    expect(result).toMatchObject({ status: "budget_exceeded", iterations: 2 });
+  });
+});

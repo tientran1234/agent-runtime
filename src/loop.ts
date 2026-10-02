@@ -1,5 +1,6 @@
 import type { z } from "zod";
 import { executeTool, semaphore, toToolSpec, type BeforeToolCall, type Limit, type ToolContext, type ToolDefinition } from "./tools.js";
+import type { BudgetOptions } from "./budget.js";
 import type { ConversationMemory } from "./memory.js";
 import { parseOutput, repairRequest, toOutputSchema } from "./output.js";
 import type { Run, Tracer } from "./trace.js";
@@ -23,7 +24,7 @@ export type AgentEvent =
   // Widest result, so one event type covers a run of any output schema.
   | { type: "done"; result: AgentResult<unknown> };
 
-export type AgentStatus = "completed" | "max_iterations" | "refused" | "truncated" | "aborted" | "invalid_output";
+export type AgentStatus = "completed" | "max_iterations" | "refused" | "truncated" | "aborted" | "invalid_output" | "budget_exceeded";
 
 export interface AgentResult<Output = never> {
   status: AgentStatus;
@@ -42,7 +43,7 @@ export interface AgentResult<Output = never> {
   output?: Output;
 }
 
-export interface AgentOptions<S extends z.ZodType = z.ZodNever> {
+export interface AgentOptions<S extends z.ZodType = z.ZodNever> extends BudgetOptions {
   provider: ModelProvider;
   /** A string becomes the first user message. */
   input: string | ChatMessage[];

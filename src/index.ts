@@ -16,6 +16,9 @@ export type {
 export { parseOutput, repairRequest, toOutputSchema } from "./output.js";
 export type { OutputParse } from "./output.js";
 
+export { BudgetLedger } from "./budget.js";
+export type { BudgetOptions } from "./budget.js";
+
 export { ConversationMemory, splitTurns } from "./memory.js";
 export type { MemoryOptions } from "./memory.js";
 
