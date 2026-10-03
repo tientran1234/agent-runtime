@@ -1,8 +1,19 @@
 import type { z } from "zod";
-import { executeTool, semaphore, toToolSpec, type BeforeToolCall, type Limit, type ToolContext, type ToolDefinition } from "./tools.js";
+import {
+  executeTool,
+  semaphore,
+  toToolSpec,
+  type BeforeToolCall,
+  type Limit,
+  type ToolContext,
+  type ToolDecision,
+  type ToolDefinition,
+  type ToolOutcome,
+} from "./tools.js";
 import { BudgetLedger, type BudgetOptions } from "./budget.js";
 import type { ConversationMemory } from "./memory.js";
 import { parseOutput, repairRequest, toOutputSchema } from "./output.js";
+import { awaitingCalls, turnCalls, type SuspendedRun } from "./resume.js";
 import type { Run, Tracer } from "./trace.js";
 import {
   EMPTY_USAGE,
@@ -24,7 +35,15 @@ export type AgentEvent =
   // Widest result, so one event type covers a run of any output schema.
   | { type: "done"; result: AgentResult<unknown> };
 
-export type AgentStatus = "completed" | "max_iterations" | "refused" | "truncated" | "aborted" | "invalid_output" | "budget_exceeded";
+export type AgentStatus =
+  | "completed"
+  | "max_iterations"
+  | "refused"
+  | "truncated"
+  | "aborted"
+  | "invalid_output"
+  | "budget_exceeded"
+  | "suspended";
 
 export interface AgentResult<Output = never> {
   status: AgentStatus;
@@ -41,6 +60,12 @@ export interface AgentResult<Output = never> {
    * reading it without having asked is a type error rather than a surprise.
    */
   output?: Output;
+  /**
+   * Everything needed to finish this run elsewhere. Set only on
+   * `status: "suspended"`, which is the one stop that is not an ending: the run
+   * is waiting on a decision, not done, and `resumeAgent` takes it from here.
+   */
+  suspended?: SuspendedRun;
 }
 
 export interface AgentOptions<S extends z.ZodType = z.ZodNever> extends BudgetOptions {
@@ -61,7 +86,7 @@ export interface AgentOptions<S extends z.ZodType = z.ZodNever> extends BudgetOp
    * Approval gate, asked about every tool call once its input has validated and
    * before the tool runs. A denial becomes an error result the model can read
    * and work around, so one refused call does not end the run — abort `signal`
-   * as well to stop there.
+   * as well to stop there. `{ ask: true }` instead suspends the run.
    */
   beforeToolCall?: BeforeToolCall;
   /**
@@ -74,6 +99,19 @@ export interface AgentOptions<S extends z.ZodType = z.ZodNever> extends BudgetOp
   output?: S;
 }
 
+export interface ResumeOptions<S extends z.ZodType = z.ZodNever> extends Omit<AgentOptions<S>, "input"> {
+  /** The snapshot a suspended run handed back. Its transcript stands in for `input`. */
+  state: SuspendedRun;
+  /**
+   * The answer for every id in `state.awaiting`. A missing one throws rather
+   * than defaulting either way: the run suspended precisely because nobody here
+   * was entitled to decide, so inventing the answer now would undo the whole
+   * exercise. `{ ask: true }` is a legal answer and suspends again, which makes
+   * polling for a decision that has not arrived yet cost nothing but a read.
+   */
+  decisions: Record<string, ToolDecision>;
+}
+
 /**
  * The bounded tool loop: model → tools → model, until the model stops calling
  * tools or something says stop. Every stop condition is a named status, not
@@ -81,6 +119,59 @@ export interface AgentOptions<S extends z.ZodType = z.ZodNever> extends BudgetOp
  */
 export async function runAgent<S extends z.ZodType = z.ZodNever>(
   options: AgentOptions<S>,
+): Promise<AgentResult<z.output<S>>> {
+  const transcript: ChatMessage[] =
+    typeof options.input === "string"
+      ? [{ role: "user", content: [{ type: "text", text: options.input }] }]
+      : options.input.slice();
+  return loop(options, transcript, undefined);
+}
+
+/**
+ * Pick a suspended run up where it stopped. The snapshot replaces `input`;
+ * everything else — provider, tools, tracer, memory — is supplied fresh, because
+ * none of it was serializable and all of it may have been redeployed since.
+ *
+ * The run continues rather than restarts: the awaited calls are the only ones
+ * run from that turn, the iterations already spent still count against
+ * `maxIterations`, and a budget resumes against what it had spent. The trace,
+ * though, is a new run: a span tree cannot be stitched across a gap that may
+ * have been a week, so the resumed run carries `resumedAfter` in its attributes
+ * and `result.usage` is what spans the whole thing.
+ */
+export async function resumeAgent<S extends z.ZodType = z.ZodNever>(
+  options: ResumeOptions<S>,
+): Promise<AgentResult<z.output<S>>> {
+  const { state, decisions } = options;
+  if (state.version !== 1) throw new Error(`resumeAgent: cannot read a suspended run of version ${String(state.version)}`);
+  // Reads the calls back out of the transcript, which also rejects a snapshot
+  // that names one the transcript does not have.
+  const pending = awaitingCalls(state);
+  if (pending.length === 0) throw new Error("resumeAgent: this run is not waiting on anything, so there is nothing to resume");
+  const missing = pending.filter((c) => decisions[c.toolUseId] === undefined);
+  if (missing.length > 0) {
+    throw new Error(
+      `resumeAgent: no decision for ${missing.map((c) => `${c.name} (${c.toolUseId})`).join(", ")} — ` +
+        `every awaiting call needs one, and { ask: true } is how you say the answer has not arrived yet.`,
+    );
+  }
+  // A turn's results go back whole or not at all, so a snapshot that lost one of
+  // its calls is caught here rather than as the provider's 400 three steps later.
+  const accounted = new Set([...state.awaiting, ...state.settled.map((r) => r.toolUseId)]);
+  const unaccounted = turnCalls(state).filter((c) => !accounted.has(c.id));
+  if (unaccounted.length > 0) {
+    throw new Error(
+      `resumeAgent: this run neither awaits nor has a result for ${unaccounted.map((c) => `${c.name} (${c.id})`).join(", ")}, ` +
+        `so the turn could only be resumed with a result missing.`,
+    );
+  }
+  return loop({ ...options, input: state.messages }, state.messages.slice(), options);
+}
+
+async function loop<S extends z.ZodType>(
+  options: AgentOptions<S>,
+  transcript: ChatMessage[],
+  resume: ResumeOptions<S> | undefined,
 ): Promise<AgentResult<z.output<S>>> {
   const tools = options.tools ?? [];
   const byName = new Map(tools.map((t) => [t.name, t]));
@@ -100,25 +191,25 @@ export async function runAgent<S extends z.ZodType = z.ZodNever>(
   // deployment's own rates bind the budget as well as the trace.
   const budget =
     options.maxCostUsd !== undefined || options.maxInputTokens !== undefined
-      ? new BudgetLedger(options, options.tracer?.prices)
+      ? new BudgetLedger(options, options.tracer?.prices, resume?.state.budget)
       : undefined;
 
-  const transcript: ChatMessage[] =
-    typeof options.input === "string"
-      ? [{ role: "user", content: [{ type: "text", text: options.input }] }]
-      : options.input.slice();
   for (const m of transcript) options.memory?.append(m);
 
-  const run = options.tracer?.startRun(options.runName ?? "agent", { provider: options.provider.name, model: options.provider.model });
-  let usage = EMPTY_USAGE;
-  let iterations = 0;
+  const run = options.tracer?.startRun(options.runName ?? "agent", {
+    provider: options.provider.name,
+    model: options.provider.model,
+    ...(resume ? { resumedAfter: resume.state.iterations } : {}),
+  });
+  let usage = resume?.state.usage ?? EMPTY_USAGE;
+  let iterations = resume?.state.iterations ?? 0;
   let output: { value: z.output<S> } | undefined;
-  let repaired = false;
+  let repaired = resume?.state.repaired ?? false;
 
-  const finish = async (status: AgentStatus, error?: unknown): Promise<AgentResult<z.output<S>>> => {
+  const finish = async (status: AgentStatus, suspended?: SuspendedRun): Promise<AgentResult<z.output<S>>> => {
     const last = transcript[transcript.length - 1];
     const text = last?.role === "assistant" ? textOf(last.content) : "";
-    const trace = run ? await run.end(error) : undefined;
+    const trace = run ? await run.end() : undefined;
     const result: AgentResult<z.output<S>> = {
       status,
       text,
@@ -127,12 +218,99 @@ export async function runAgent<S extends z.ZodType = z.ZodNever>(
       usage,
       ...(trace ? { trace } : {}),
       ...(output ? { output: output.value } : {}),
+      ...(suspended ? { suspended } : {}),
     };
     emit({ type: "done", result });
     return result;
   };
 
+  /** Tool results in the order the model asked for the calls, which is the order they have to go back in. */
+  const inCallOrder = (turn: readonly ToolUsePart[], parts: readonly ToolResultPart[]): ToolResultPart[] => {
+    const byId = new Map(parts.map((p) => [p.toolUseId, p]));
+    return turn.map((c) => byId.get(c.id)).filter((p): p is ToolResultPart => p !== undefined);
+  };
+
+  const snapshot = (turn: readonly ToolUsePart[], settled: readonly ToolResultPart[], awaiting: string[]): SuspendedRun => ({
+    version: 1,
+    messages: transcript,
+    iterations,
+    usage,
+    repaired,
+    ...(budget ? { budget: budget.state } : {}),
+    awaiting,
+    settled: inCallOrder(turn, settled),
+  });
+
+  /**
+   * Run some of a turn's calls. `approverFor` is how the caller says who decides:
+   * the run's own gate on a fresh turn, the stored answers on a resumed one.
+   */
+  const execute = async (
+    calls: readonly ToolUsePart[],
+    approverFor: (call: ToolUsePart, tool: ToolDefinition) => ((input: unknown) => Promise<ToolDecision> | ToolDecision) | undefined,
+  ): Promise<Array<{ call: ToolUsePart; outcome: ToolOutcome }>> =>
+    // All tool calls from one turn run concurrently, and ALL their results go
+    // back in ONE user message. Splitting them across messages teaches the
+    // model to stop making parallel calls.
+    Promise.all(
+      calls.map(async (call) => {
+        emit({ type: "tool_call", id: call.id, name: call.name, input: call.input });
+        const toolSpan = run?.startSpan("tool.call", call.name, { toolUseId: call.id });
+        const tool = byName.get(call.name);
+        const limit = limits.get(call.name);
+        // A name with no tool behind it never reaches the gate: there is
+        // nothing to approve, and the model needs the mistake back either way.
+        const approve = tool ? approverFor(call, tool) : undefined;
+        const outcome: ToolOutcome = tool
+          ? await executeTool(
+              tool,
+              call.input,
+              { ...options.toolContext, ...(options.signal ? { signal: options.signal } : {}) },
+              {
+                ...(approve ? { approve } : {}),
+                ...(limit ? { limit } : {}),
+              },
+            )
+          : { content: `unknown tool: ${call.name}`, isError: true, durationMs: 0 };
+        // An awaiting call did not run, so it is not a tool error and has no
+        // result to report: a `tool_result` event for it would have a UI render
+        // a failure where the truth is that nobody has answered yet.
+        if (outcome.awaiting) toolSpan?.setAttributes({ awaiting: true, durationMs: outcome.durationMs }).end();
+        else {
+          toolSpan?.setAttributes({ isError: outcome.isError, durationMs: outcome.durationMs }).end(outcome.isError ? outcome.content : undefined);
+          emit({ type: "tool_result", id: call.id, name: call.name, content: outcome.content, isError: outcome.isError, durationMs: outcome.durationMs });
+        }
+        return { call, outcome };
+      }),
+    );
+
+  const resultsOf = (outcomes: Array<{ call: ToolUsePart; outcome: ToolOutcome }>): ToolResultPart[] =>
+    outcomes
+      .filter(({ outcome }) => !outcome.awaiting)
+      .map(({ call, outcome }) => ({ type: "tool_result", toolUseId: call.id, content: outcome.content, isError: outcome.isError }));
+
   try {
+    // The turn a suspension interrupted, finished first: only the calls that
+    // were waiting are run, the rest are carried, and the run then rejoins the
+    // loop at the model call that turn was always going to lead to.
+    if (resume) {
+      // Before the side effect, not after it: a run resumed under a signal that
+      // is already aborted must not be the thing that fires the approved call.
+      if (options.signal?.aborted) return finish("aborted");
+      const turn = turnCalls(resume.state);
+      const waiting = turn.filter((c) => resume.state.awaiting.includes(c.id));
+      const outcomes = await execute(waiting, (call) => () => resume.decisions[call.id]!);
+      const settled = [...resume.state.settled, ...resultsOf(outcomes)];
+      const stillWaiting = outcomes.filter(({ outcome }) => outcome.awaiting).map(({ call }) => call.id);
+      if (stillWaiting.length > 0) {
+        run?.setAttributes({ suspended: describe(turn, stillWaiting) });
+        return finish("suspended", snapshot(turn, settled, stillWaiting));
+      }
+      const user: ChatMessage = { role: "user", content: inCallOrder(turn, settled) };
+      transcript.push(user);
+      options.memory?.append(user);
+    }
+
     while (iterations < maxIterations) {
       if (options.signal?.aborted) return finish("aborted");
 
@@ -208,35 +386,18 @@ export async function runAgent<S extends z.ZodType = z.ZodNever>(
         continue;
       }
 
-      // All tool calls from one turn run concurrently, and ALL their results go
-      // back in ONE user message. Splitting them across messages teaches the
-      // model to stop making parallel calls.
-      const results = await Promise.all(
-        calls.map(async (call): Promise<ToolResultPart> => {
-          emit({ type: "tool_call", id: call.id, name: call.name, input: call.input });
-          const toolSpan = run?.startSpan("tool.call", call.name, { toolUseId: call.id });
-          const tool = byName.get(call.name);
-          const limit = limits.get(call.name);
-          // A name with no tool behind it never reaches the gate: there is
-          // nothing to approve, and the model needs the mistake back either way.
-          const outcome = tool
-            ? await executeTool(
-                tool,
-                call.input,
-                { ...options.toolContext, ...(options.signal ? { signal: options.signal } : {}) },
-                {
-                  ...(gate ? { approve: (input: unknown) => gate({ tool, id: call.id, input }) } : {}),
-                  ...(limit ? { limit } : {}),
-                },
-              )
-            : { content: `unknown tool: ${call.name}`, isError: true, durationMs: 0 };
-          toolSpan?.setAttributes({ isError: outcome.isError, durationMs: outcome.durationMs }).end(outcome.isError ? outcome.content : undefined);
-          emit({ type: "tool_result", id: call.id, name: call.name, ...outcome });
-          return { type: "tool_result", toolUseId: call.id, content: outcome.content, isError: outcome.isError };
-        }),
-      );
+      const outcomes = await execute(calls, (call, tool) => (gate ? (input: unknown) => gate({ tool, id: call.id, input }) : undefined));
+      const awaiting = outcomes.filter(({ outcome }) => outcome.awaiting).map(({ call }) => call.id);
+      // One undecided call suspends the whole turn, not just itself. Its
+      // siblings have already run and their results are carried, because the
+      // model may not have a turn's results arrive in two messages — and
+      // because re-running them later is a second set of side effects.
+      if (awaiting.length > 0) {
+        run?.setAttributes({ suspended: describe(calls, awaiting) });
+        return finish("suspended", snapshot(calls, resultsOf(outcomes), awaiting));
+      }
 
-      const user: ChatMessage = { role: "user", content: results };
+      const user: ChatMessage = { role: "user", content: inCallOrder(calls, resultsOf(outcomes)) };
       transcript.push(user);
       options.memory?.append(user);
     }
@@ -245,4 +406,10 @@ export async function runAgent<S extends z.ZodType = z.ZodNever>(
     await run?.end(err);
     throw err;
   }
+}
+
+/** What the run records about a suspension: which calls are waiting, by name. */
+function describe(turn: readonly ToolUsePart[], awaiting: readonly string[]): string {
+  const names = new Map(turn.map((c) => [c.id, c.name]));
+  return `awaiting a decision on ${awaiting.map((id) => `${names.get(id) ?? "?"} (${id})`).join(", ")}`;
 }

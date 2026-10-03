@@ -1,5 +1,8 @@
-export { runAgent } from "./loop.js";
-export type { AgentEvent, AgentOptions, AgentResult, AgentStatus } from "./loop.js";
+export { runAgent, resumeAgent } from "./loop.js";
+export type { AgentEvent, AgentOptions, AgentResult, AgentStatus, ResumeOptions } from "./loop.js";
+
+export { awaitingCalls } from "./resume.js";
+export type { AwaitingCall, SuspendedRun } from "./resume.js";
 
 export { defineTool, executeTool, semaphore, toToolSpec } from "./tools.js";
 export type {
@@ -17,7 +20,7 @@ export { parseOutput, repairRequest, toOutputSchema } from "./output.js";
 export type { OutputParse } from "./output.js";
 
 export { BudgetLedger } from "./budget.js";
-export type { BudgetOptions } from "./budget.js";
+export type { BudgetOptions, BudgetState } from "./budget.js";
 
 export { ConversationMemory, splitTurns } from "./memory.js";
 export type { MemoryOptions } from "./memory.js";

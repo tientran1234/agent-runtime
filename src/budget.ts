@@ -20,6 +20,19 @@ export interface BudgetOptions {
   maxInputTokens?: number;
 }
 
+/**
+ * A ledger's totals as plain JSON. A run that can be suspended has to carry
+ * them, or its cap would restart from zero in the process that finishes it and
+ * bound two short runs instead of one long one.
+ */
+export interface BudgetState {
+  usage: Usage;
+  /** Null once a call's price was unknown. Restored as null, not as zero. */
+  spentUsd: number | null;
+  /** The last call, which is what the next one is forecast from. Absent before the first call. */
+  last?: { model: string; usage: Usage; costUsd: number | null };
+}
+
 /** Every token that went in, by whichever route it was billed. */
 function inputTokensOf(usage: Usage): number {
   return usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
@@ -50,15 +63,27 @@ const dollars = (amount: number) => `$${amount.toFixed(5)}`;
  * what stops a tool loop from spending all afternoon.
  */
 export class BudgetLedger {
-  private usage: Usage = EMPTY_USAGE;
+  private usage: Usage;
   /** Null once a call's price is unknown, exactly as the tracer's total goes null. */
-  private spentUsd: number | null = 0;
+  private spentUsd: number | null;
   private last: { model: string; usage: Usage; costUsd: number | null } | undefined;
 
   constructor(
     private readonly limits: BudgetOptions,
     private readonly prices: Record<string, Price> | undefined = undefined,
-  ) {}
+    state?: BudgetState,
+  ) {
+    this.usage = state?.usage ?? EMPTY_USAGE;
+    // Not `?? 0`: a restored `null` means a price was already unknown, and
+    // coalescing it would turn an unmeasurable spend back into a measured zero.
+    this.spentUsd = state === undefined ? 0 : state.spentUsd;
+    this.last = state?.last;
+  }
+
+  /** The totals as plain JSON, for a snapshot that has to carry the budget with it. */
+  get state(): BudgetState {
+    return { usage: this.usage, spentUsd: this.spentUsd, ...(this.last ? { last: this.last } : {}) };
+  }
 
   /** Add a finished call to the totals, and make it the forecast for the next one. */
   record(response: ModelResponse): void {
