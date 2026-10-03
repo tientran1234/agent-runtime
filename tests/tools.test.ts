@@ -141,6 +141,20 @@ describe("approval gates", () => {
     expect(out.content).toMatch(/tool deploy was not approved: .*approval service down/);
   });
 
+  it("does not run a tool whose gate asked instead of deciding, and marks it awaiting", async () => {
+    let ran = 0;
+    const out = await executeTool(deploy(() => void ran++), {}, {}, { approve: () => ({ ask: true }) });
+    expect(ran).toBe(0);
+    expect(out).toMatchObject({ awaiting: true, isError: true, content: "tool deploy is waiting for a decision" });
+  });
+
+  it("leaves `awaiting` unset on a call that was decided, either way", async () => {
+    const allowed = await executeTool(deploy(() => {}), {}, {}, { approve: () => ({ allow: true }) });
+    const denied = await executeTool(deploy(() => {}), {}, {}, { approve: () => ({ allow: false }) });
+    expect(allowed.awaiting).toBeUndefined();
+    expect(denied.awaiting).toBeUndefined();
+  });
+
   it("does not spend the tool's timeout waiting for the gate", async () => {
     const quick = defineTool({ name: "quick", description: "", input: z.object({}), timeoutMs: 30, execute: () => "ok" });
     const out = await executeTool(quick, {}, {}, { approve: async () => (await sleep(80), { allow: true }) });

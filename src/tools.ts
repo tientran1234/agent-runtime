@@ -124,6 +124,14 @@ export interface ToolOutcome {
   content: string;
   isError: boolean;
   durationMs: number;
+  /**
+   * The gate asked for the decision to be made elsewhere, so the tool has not
+   * run and nothing about this call is final yet. `runAgent` reads this and
+   * suspends the run; `content` and `isError` are what a caller with nowhere to
+   * suspend to — a direct `executeTool` — sends the model instead, because the
+   * one thing that must not follow an undecided gate is the tool running.
+   */
+  awaiting?: true;
 }
 
 /** A tool call that has validated but not run yet — what an approval gate judges. */
@@ -136,12 +144,19 @@ export interface PendingToolCall {
   input: unknown;
 }
 
-export type ToolDecision = { allow: true } | { allow: false; reason?: string };
+/**
+ * The three answers a gate can give. `{ ask: true }` is the one that is not a
+ * verdict: it says the decision belongs to someone who is not in this process,
+ * which stops the run where it stands instead of guessing on their behalf.
+ */
+export type ToolDecision = { allow: true } | { allow: false; reason?: string } | { ask: true };
 
 /**
  * Asked about every tool call before it runs. There is no implicit allow: the
  * hook has to answer, so a branch that forgets to cannot let a side effect
- * through, and a hook that throws denies rather than falling open.
+ * through, and a hook that throws denies rather than falling open. Answering
+ * `{ ask: true }` suspends the run with `status: "suspended"` and a snapshot
+ * `resumeAgent` can finish once the answer exists.
  */
 export type BeforeToolCall = (call: PendingToolCall) => Promise<ToolDecision> | ToolDecision;
 
@@ -198,6 +213,12 @@ export async function executeTool(
     } catch (err) {
       // Fail closed. A gate that breaks must not become an open door.
       return done(`tool ${tool.name} was not approved: the approval check failed: ${messageOf(err)}`, true);
+    }
+    // Undecided is not denied: the call keeps its claim on being allowed later,
+    // which is why it leaves nothing behind in the transcript and the run that
+    // can suspend stops rather than feeding the model a refusal to work around.
+    if ("ask" in decision) {
+      return { ...done(`tool ${tool.name} is waiting for a decision`, true), awaiting: true };
     }
     if (!decision.allow) {
       return done(`tool ${tool.name} was not approved${decision.reason ? `: ${decision.reason}` : ""}`, true);
