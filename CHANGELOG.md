@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-03
+
+- Resumable runs: loop state (transcript, iteration, pending approval) serializes as JSON, so a run paused by `beforeToolCall → { ask: true }` stops with status `suspended` and `resumeAgent` finishes it in another process — running only the calls that were waiting, with the iterations, tokens and budget already spent still counted — with an example in the README hosting a run inside a durable-workflow step.
+
 ## 2026-10-02
 
 - Budget guard: `maxCostUsd` / `maxInputTokens` per run — the loop stops with status `budget_exceeded` before the call that would exceed, forecasting it from the last call against the tracer's running totals, so a cap bounds a run to within one call instead of reporting the overrun afterwards.

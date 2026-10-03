@@ -29,7 +29,8 @@ const result = await runAgent({
   tracer: new Tracer({ exporters: [new ConsoleExporter()] }),
 });
 
-result.status;   // "completed" | "max_iterations" | "refused" | "truncated" | "aborted" | "invalid_output" | "budget_exceeded"
+result.status;   // "completed" | "max_iterations" | "refused" | "truncated" | "aborted"
+                 // | "invalid_output" | "budget_exceeded" | "suspended"
 result.text;     // the final answer
 result.usage;    // tokens across every model call
 ```
@@ -68,6 +69,11 @@ result.usage;    // tokens across every model call
 - **Nothing runs unapproved where a gate is set.** `beforeToolCall` is asked
   about every call and has to answer. A denial — or a gate that throws — becomes
   an error result the model can work around, and the tool never runs.
+- **A decision nobody here can make stops the run rather than being guessed.**
+  A gate that answers `{ ask: true }` ends the run with `status: "suspended"`
+  and a JSON snapshot of the loop. `resumeAgent` finishes it in another process,
+  running only the calls that were waiting — the siblings that already ran are
+  carried, not repeated.
 - **Every stop is a status, never an exception.** Provider errors still throw
   — the caller has to know the difference between "the agent decided to stop"
   and "the network died".
@@ -105,11 +111,12 @@ consulted for every call after its input has validated and before the tool runs.
 After, so whoever approves sees exactly the input `execute` will get and is
 never asked to judge a payload the schema would have rejected anyway; before,
 because afterwards there is nothing left to approve. The hook answers
-`{ allow: true }` or `{ allow: false, reason }` — there is no implicit allow,
-and a hook that throws denies, because a gate whose forgotten branch means yes
-is worse than no gate. A denial is an error result the model reads and works
-around, so one refused call does not end the run; abort `signal` as well to stop
-there.
+`{ allow: true }`, `{ allow: false, reason }` or `{ ask: true }` — there is no
+implicit allow, and a hook that throws denies, because a gate whose forgotten
+branch means yes is worse than no gate. A denial is an error result the model
+reads and works around, so one refused call does not end the run; abort `signal`
+as well to stop there. `{ ask: true }` is the answer that is not a verdict, and
+it suspends the run instead.
 
 ```ts
 await runAgent({
@@ -131,6 +138,101 @@ its gate waits — one pending approval must not starve the rest of the turn.
 while `durationMs` still spans the wait and the trace reports the latency that
 was real. Limiters live for one run, which is the scope the parallelism has:
 a turn's calls are the only ones the loop ever has in flight.
+
+**A run that waits on a human waits as data, not as a process.** An approval
+that has to come from a person is a wait of minutes or days, and nothing in a
+request's lifetime holds for that: the caller times out, the container is
+recycled, the deploy goes out. So the gate has a third answer. `{ ask: true }`
+says the decision belongs to someone who is not in this process, and the run
+ends with `status: "suspended"` and a `SuspendedRun` that is plain JSON.
+
+```ts
+const first = await runAgent({
+  provider,
+  tools: [getOrder, refundOrder],
+  input: "Refund ord_42.",
+  beforeToolCall: ({ tool }) => (tool.name === "refund_order" ? { ask: true } : { allow: true }),
+});
+
+first.status;                     // "suspended" — refund_order has not run
+awaitingCalls(first.suspended!);  // [{ toolUseId: "toolu_1", name: "refund_order", input: { orderId: "ord_42" } }]
+await store.put(runId, first.suspended);
+```
+
+```ts
+const result = await resumeAgent({
+  provider,                                 // supplied again: none of this was serializable
+  tools: [getOrder, refundOrder],
+  state: await store.get(runId),
+  decisions: { toolu_1: { allow: true } },  // or { allow: false, reason }, or { ask: true } to keep waiting
+});
+```
+
+The snapshot is the loop's state and nothing else: the transcript through the
+turn whose tools were asked about, the iterations and tokens already spent, the
+budget's totals, whether the one repair round has been used, and that turn's
+calls split into the ones that settled and the ones still waiting. What it
+deliberately leaves out is the provider, the tools, the tracer and the memory —
+those are code, and a snapshot carrying them would only be readable by the
+process that wrote it, which is the opposite of the point. Resuming supplies
+them again, so a stored snapshot never pins a tool to the implementation that
+happened to suspend, and a week-old one still resumes against today's deploy.
+
+A suspension takes the whole turn, not the one call. Its siblings have already
+run — all of a turn's calls go out together — so their results travel in the
+snapshot as `settled` and the resumed run does not execute them again: a tool
+that has had its side effect must not have a second one, and a provider will not
+take a turn's results in two messages either. The transcript therefore stops at
+the assistant turn, because a half-filled `tool_result` message is one every
+provider rejects, and the resumed run is what completes it. An awaiting call is
+not a tool error and gets no `tool_result` event: nothing failed, nobody has
+answered yet.
+
+`resumeAgent` demands a decision for every awaiting id and throws on a missing
+one rather than defaulting either way. The run suspended precisely because
+nobody in this process was entitled to decide, so filling the gap in here would
+undo the whole exercise. `{ ask: true }` is a legal decision and suspends again,
+which makes polling for an answer that has not arrived cost a read and nothing
+else. The run continues rather than restarts: spent iterations still count
+against `maxIterations`, `result.usage` covers both legs, and a budget resumes
+against what it had already spent — a `maxCostUsd` that reset at the suspension
+would bound two short runs instead of the one long run it was set on. The trace
+is the exception, and is a new run with `resumedAfter` in its attributes: a span
+tree cannot honestly be stitched across a gap that may have been a week.
+
+**Hosting a suspended run is what a workflow engine is for.** The snapshot is
+JSON and the decision arrives as a signal, which is exactly the shape of a step
+and a wait:
+
+```ts
+import { defineSignal, defineWorkflow } from "durable-workflow";
+import { awaitingCalls, resumeAgent, runAgent } from "agent-runtime";
+import { z } from "zod";
+
+const decided = defineSignal("tool-approval", z.object({ allow: z.boolean(), reason: z.string().default("") }));
+
+export const supportAgent = defineWorkflow<{ prompt: string }, string>("support-agent", async (ctx, { prompt }) => {
+  // A step's result is persisted, so the snapshot has to be JSON — which it is.
+  let state = (await ctx.step("start", () => runAgent({ provider, tools, input: prompt, beforeToolCall: gate }))).suspended;
+
+  while (state) {
+    const [call] = awaitingCalls(state);
+    // Costs nothing while it waits: the run is history plus a pending signal.
+    const answer = await ctx.waitFor(decided, { timeoutMs: 24 * 3600_000 });
+    const decisions = { [call!.toolUseId]: answer.allow ? { allow: true as const } : { allow: false as const, reason: answer.reason } };
+    const next = await ctx.step(`resume-${call!.toolUseId}`, () => resumeAgent({ provider, tools, state: state!, decisions, beforeToolCall: gate }));
+    if (next.status !== "suspended") return next.text;
+    state = next.suspended;
+  }
+  return "";
+});
+```
+
+The two libraries agree on one thing and need nothing else of each other: the
+state in between is a value. `ctx.step` memoises the resume, so a worker that
+dies after the refund went through replays that step from history rather than
+refunding twice; the agent's own guarantee that a settled call is never re-run
+covers the rest of the turn.
 
 **A prompt is regression-testable because the model is scripted.** A
 `Scenario` is a system prompt, a tool set, an input, and the answers the model
@@ -329,6 +431,7 @@ src/
   tools.ts           defineTool (Zod) · executeTool: validate → approve → limit → timeout → truncate
   loop.ts            runAgent — the bounded loop, events, statuses
   output.ts          the output schema: JSON Schema out, the final answer parsed back
+  resume.ts          SuspendedRun: the loop's state as JSON, and the calls it is waiting on
   budget.ts          BudgetLedger: what a run has spent, and whether the next call fits
   memory.ts          ConversationMemory: token budget, turn-wise trimming, summariser hook
   trace.ts           Tracer / runs / spans, usage + cost, Memory and Console exporters
@@ -341,7 +444,7 @@ src/
     anthropic.ts     the only file importing @anthropic-ai/sdk
     openai-compatible.ts  the same port over POST /chat/completions, on fetch
     fake.ts          scripted provider + builders for tests
-tests/               144 tests, no network, no API key
+tests/               169 tests, no network, no API key
 ```
 
 ## SSE
@@ -383,7 +486,7 @@ ANTHROPIC_API_KEY=… node -e '…'   # or `ant auth login`; the SDK picks eithe
 
 ## What is deliberately not here
 
-- **Persistence of runs.** Traces go to an exporter; where they land is your
-  call. Pair with a workflow engine for durable multi-step agents.
+- **A store.** A suspended run hands its state back and traces go to an
+  exporter; where either lands is your call.
 - **A planner or multi-agent orchestration.** This is the runtime one agent
   runs on. Orchestration is a layer above it.
