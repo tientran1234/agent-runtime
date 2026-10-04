@@ -1,10 +1,18 @@
 import { z } from "zod";
+import type { SpanHandle } from "./trace.js";
 import type { ToolSpec } from "./types.js";
 
 export interface ToolContext {
   signal?: AbortSignal;
   /** Free-form; the loop passes through whatever the caller supplied. */
   meta?: Record<string, unknown>;
+  /**
+   * This call's own span, when the run is being traced. A tool that does
+   * traceable work of its own — above all one that runs a nested agent — hangs
+   * it here, so the work appears under the call that caused it and its cost
+   * counts towards the same run.
+   */
+  span?: SpanHandle;
 }
 
 export interface ToolDefinition<Input = unknown> {

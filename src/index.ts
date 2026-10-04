@@ -26,7 +26,7 @@ export { ConversationMemory, splitTurns } from "./memory.js";
 export type { MemoryOptions } from "./memory.js";
 
 export { Tracer, MemoryExporter, ConsoleExporter } from "./trace.js";
-export type { Run, RunTotals, Span, SpanKind, TraceExporter, TracerOptions } from "./trace.js";
+export type { Run, RunTotals, Span, SpanHandle, SpanKind, SpanParent, TraceExporter, TracerOptions } from "./trace.js";
 
 export { assertScenario, renderTranscript, runScenario } from "./regression.js";
 export type { Scenario, ScenarioReport, ScriptedTurn } from "./regression.js";

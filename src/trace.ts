@@ -7,6 +7,8 @@ export type SpanKind = "model.call" | "tool.call" | "custom";
 export interface Span {
   id: string;
   runId: string;
+  /** The span this one happened inside, when it happened inside one at all. */
+  parentId?: string;
   kind: SpanKind;
   name: string;
   startedAt: number;
@@ -58,10 +60,15 @@ export class ConsoleExporter implements TraceExporter {
   constructor(private readonly log: (line: string) => void = console.log) {}
   export(run: Run) {
     this.log(`run ${run.name} [${run.status}] ${run.durationMs}ms`);
+    const depths = depthOf(run.spans);
     for (const s of run.spans) {
       const cost = s.costUsd === undefined ? "" : s.costUsd === null ? " cost=?" : ` cost=$${s.costUsd.toFixed(5)}`;
       const tokens = s.usage ? ` in=${s.usage.inputTokens} out=${s.usage.outputTokens}${cacheTokens(s.usage)}` : "";
-      this.log(`  ${s.kind.padEnd(10)} ${s.name.padEnd(24)} ${String(s.durationMs).padStart(6)}ms${tokens}${cost}${s.error ? ` ERROR ${s.error}` : ""}`);
+      // Indented by depth: a nested agent's calls are listed in the same flat
+      // run as the tool call that made them, and without the indent there is
+      // nothing in the line that says whose calls they were.
+      const indent = "  ".repeat(depths.get(s.id) ?? 0);
+      this.log(`  ${indent}${s.kind.padEnd(10)} ${s.name.padEnd(24)} ${String(s.durationMs).padStart(6)}ms${tokens}${cost}${s.error ? ` ERROR ${s.error}` : ""}`);
     }
     const t = run.totals;
     this.log(`  totals: ${t.modelCalls} model calls, ${t.toolCalls} tool calls (${t.toolErrors} failed), ${t.usage.inputTokens}+${t.usage.outputTokens} tokens${cacheTokens(t.usage)}, cost ${t.costUsd === null ? "unknown" : `$${t.costUsd.toFixed(5)}`}`);
@@ -77,10 +84,32 @@ function cacheTokens(usage: Usage): string {
   return ` cache_r=${usage.cacheReadTokens} cache_w=${usage.cacheWriteTokens}`;
 }
 
+/**
+ * How deep each span sits. A parent is always pushed before its children, so
+ * one pass in order is enough — and a `parentId` the run does not have (a span
+ * read back from a truncated export) is treated as no parent rather than
+ * dropping the line.
+ */
+function depthOf(spans: readonly Span[]): Map<string, number> {
+  const depths = new Map<string, number>();
+  for (const span of spans) depths.set(span.id, span.parentId ? (depths.get(span.parentId) ?? -1) + 1 : 0);
+  return depths;
+}
+
 export interface TracerOptions {
   exporters?: TraceExporter[];
   prices?: Record<string, Price>;
   now?: () => number;
+}
+
+/**
+ * Where a loop's spans go: its own run, or — for an agent nested inside a tool
+ * call — that call's span. Both answer the same two questions, which is all the
+ * loop ever asks of either.
+ */
+export interface SpanParent {
+  startSpan(kind: SpanKind, name: string, attributes?: Record<string, unknown>): SpanHandle;
+  setAttributes(attributes: Record<string, unknown>): this;
 }
 
 export class SpanHandle {
@@ -93,6 +122,16 @@ export class SpanHandle {
   setAttributes(attributes: Record<string, unknown>): this {
     Object.assign(this.span.attributes, attributes);
     return this;
+  }
+
+  /**
+   * A span for work that happened inside this one — what a tool running its own
+   * agent hangs that agent's calls on. It belongs to the same run, so the run's
+   * totals count it: a nested agent's tokens and cost are part of what the call
+   * that started it cost.
+   */
+  startSpan(kind: SpanKind, name: string, attributes: Record<string, unknown> = {}): SpanHandle {
+    return this.tracer.open(this.run, kind, name, attributes, this.span.id);
   }
 
   /** Attach token usage; cost is looked up from the price table for `model`. */
@@ -129,9 +168,7 @@ export class RunHandle {
   }
 
   startSpan(kind: SpanKind, name: string, attributes: Record<string, unknown> = {}): SpanHandle {
-    const span: Span = { id: randomUUID(), runId: this.run.id, kind, name, startedAt: this.tracer.now(), attributes };
-    this.run.spans.push(span);
-    return new SpanHandle(span, this.tracer, this.run);
+    return this.tracer.open(this.run, kind, name, attributes);
   }
 
   async end(error?: unknown): Promise<Run> {
@@ -167,6 +204,21 @@ export class Tracer {
       totals: { modelCalls: 0, toolCalls: 0, toolErrors: 0, usage: EMPTY_USAGE, costUsd: 0 },
     };
     return new RunHandle(run, this);
+  }
+
+  /** @internal */
+  open(run: Run, kind: SpanKind, name: string, attributes: Record<string, unknown>, parentId?: string): SpanHandle {
+    const span: Span = {
+      id: randomUUID(),
+      runId: run.id,
+      ...(parentId ? { parentId } : {}),
+      kind,
+      name,
+      startedAt: this.now(),
+      attributes,
+    };
+    run.spans.push(span);
+    return new SpanHandle(span, this, run);
   }
 
   /** @internal */

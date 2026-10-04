@@ -14,7 +14,7 @@ import { BudgetLedger, type BudgetOptions } from "./budget.js";
 import type { ConversationMemory } from "./memory.js";
 import { parseOutput, repairRequest, toOutputSchema } from "./output.js";
 import { awaitingCalls, turnCalls, type SuspendedRun } from "./resume.js";
-import type { Run, Tracer } from "./trace.js";
+import type { Run, SpanHandle, SpanParent, Tracer } from "./trace.js";
 import {
   EMPTY_USAGE,
   addUsage,
@@ -79,6 +79,15 @@ export interface AgentOptions<S extends z.ZodType = z.ZodNever> extends BudgetOp
   memory?: ConversationMemory;
   tracer?: Tracer;
   runName?: string;
+  /**
+   * Hang this run's spans under a span that already exists, instead of starting
+   * a run of its own. That is what a nested agent wants: one trace covers the
+   * whole handoff, and the outer run's totals include what the nested calls
+   * cost. A nested run reports no `result.trace` — the spans are the parent's
+   * run, and the parent is the one that ends it — and `runName` has no run to
+   * name, so the span's own name stands for it.
+   */
+  parentSpan?: SpanHandle;
   onEvent?: (event: AgentEvent) => void;
   signal?: AbortSignal;
   toolContext?: Omit<ToolContext, "signal">;
@@ -196,11 +205,16 @@ async function loop<S extends z.ZodType>(
 
   for (const m of transcript) options.memory?.append(m);
 
-  const run = options.tracer?.startRun(options.runName ?? "agent", {
+  const attributes = {
     provider: options.provider.name,
     model: options.provider.model,
     ...(resume ? { resumedAfter: resume.state.iterations } : {}),
-  });
+  };
+  // `owned` is the run this loop has to close; `run` is only where spans go.
+  // They differ for a nested agent, which writes into a span somebody else
+  // opened and must not end the run that span belongs to.
+  const owned = options.parentSpan ? undefined : options.tracer?.startRun(options.runName ?? "agent", attributes);
+  const run: SpanParent | undefined = options.parentSpan?.setAttributes(attributes) ?? owned;
   let usage = resume?.state.usage ?? EMPTY_USAGE;
   let iterations = resume?.state.iterations ?? 0;
   let output: { value: z.output<S> } | undefined;
@@ -209,7 +223,7 @@ async function loop<S extends z.ZodType>(
   const finish = async (status: AgentStatus, suspended?: SuspendedRun): Promise<AgentResult<z.output<S>>> => {
     const last = transcript[transcript.length - 1];
     const text = last?.role === "assistant" ? textOf(last.content) : "";
-    const trace = run ? await run.end() : undefined;
+    const trace = owned ? await owned.end() : undefined;
     const result: AgentResult<z.output<S>> = {
       status,
       text,
@@ -265,7 +279,11 @@ async function loop<S extends z.ZodType>(
           ? await executeTool(
               tool,
               call.input,
-              { ...options.toolContext, ...(options.signal ? { signal: options.signal } : {}) },
+              {
+                ...options.toolContext,
+                ...(options.signal ? { signal: options.signal } : {}),
+                ...(toolSpan ? { span: toolSpan } : {}),
+              },
               {
                 ...(approve ? { approve } : {}),
                 ...(limit ? { limit } : {}),
@@ -403,7 +421,7 @@ async function loop<S extends z.ZodType>(
     }
     return finish("max_iterations");
   } catch (err) {
-    await run?.end(err);
+    await owned?.end(err);
     throw err;
   }
 }
