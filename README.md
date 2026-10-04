@@ -234,6 +234,89 @@ dies after the refund went through replays that step from history rather than
 refunding twice; the agent's own guarantee that a settled call is never re-run
 covers the rest of the turn.
 
+**A sub-agent is one tool call, not a second runtime.**
+`handoffTool({ name, description, ...AgentOptions })` is a `ToolDefinition`
+whose `execute` is a whole nested `runAgent` — its own provider, system prompt,
+tools, `maxIterations` and budget. The parent sees one tool that takes one
+string.
+
+```ts
+import { handoffTool, runAgent } from "agent-runtime";
+
+const researcher = handoffTool({
+  name: "research",
+  description: "Hand a research task to a researcher who can read the document store",
+  provider: new AnthropicProvider({ model: "claude-sonnet-5-5" }),
+  system: "You are a researcher. Answer only from documents you have read.",
+  tools: [searchDocs, readDoc, listSources],
+  maxIterations: 12,
+  maxCostUsd: 0.25,
+});
+
+const result = await runAgent({
+  provider: new AnthropicProvider({ model: "claude-opus-5" }),
+  system: "You are a manager. Delegate research; do not read documents yourself.",
+  tools: [researcher, replyToUser],
+  input: "What changed in our refund policy this year?",
+  tracer,
+});
+```
+
+The reason to split is what the parent stops carrying. Tool choice gets worse
+the more tools there are, and the three document tools plus the instructions for
+using them plus every intermediate search result are context the manager never
+needs: it needs the answer. A handoff keeps all of it inside the nested run, so
+the parent pays for the brief and the final text and nothing in between — and
+the sub-agent can run on a cheaper model, a tighter budget and a prompt written
+for one job.
+
+The brief is therefore the whole interface. The sub-agent starts from an empty
+transcript: it cannot see the parent's conversation, the files it mentioned or
+any earlier tool result, so the input schema says exactly that in the place the
+model will read it. A parent that points instead of explaining gets a sub-agent
+working on nothing, and that is a prompt problem, not something the runtime can
+paper over.
+
+Only `status: "completed"` is an answer. Every other stop comes back as an
+*error result* naming the status — `max_iterations`, `refused`,
+`budget_exceeded`, a sub-agent that finished with nothing to say — because a
+parent model handed half a sub-agent's work with no word of how it ended would
+read it as the finished thing. As an error result rather than an exception, so
+the parent can try a smaller brief or answer without it; the parent run is not
+over because a handoff failed. The one stop with its own message is a nested
+gate answering `{ ask: true }`: a `SuspendedRun` is one loop's state and the
+parent is mid-turn in a loop of its own, so a nested suspension cannot be passed
+up. Decide inside the sub-agent's gate, or gate the handoff itself in the parent
+and suspend there.
+
+Two things are taken per call rather than from the options the tool was defined
+with, because the options are read once and every call runs from them: the live
+abort `signal`, so an aborted parent takes its sub-agents down with it, and
+`memory`, which is a factory for that reason — one `ConversationMemory` is one
+conversation, and sharing it would feed each sub-agent the last one's
+transcript.
+
+A handoff is also one call in the trace. The nested run does not start a run of
+its own: its spans hang under the tool call that caused them, in the parent's
+run, so the parent's totals count the nested tokens and cost as what that call
+cost. `ConsoleExporter` indents them.
+
+```
+run agent [ok] 3159ms
+  model.call claude-opus-5               620ms in=1840 out=96 cost=$0.01392
+  tool.call  research                   2131ms
+    model.call claude-sonnet-5-5           910ms in=820 out=140 cost=$0.00456
+    tool.call  search_docs                  41ms
+    model.call claude-sonnet-5-5          1180ms in=1620 out=210 cost=$0.00801
+  model.call claude-opus-5               408ms in=2010 out=64 cost=$0.01398
+  totals: 4 model calls, 2 tool calls (0 failed), 6290+510 tokens, cost $0.04047
+```
+
+That is why `parentSpan` exists on `AgentOptions` at all, and why a nested run
+reports no `result.trace`: the spans belong to a run somebody else opened and
+will end. Where the parent is not traced, a handoff given its own `tracer`
+falls back to starting a run with it.
+
 **A prompt is regression-testable because the model is scripted.** A
 `Scenario` is a system prompt, a tool set, an input, and the answers the model
 gives, run through `FakeProvider`; `assertScenario` compares what the loop did
@@ -432,6 +515,7 @@ src/
   loop.ts            runAgent — the bounded loop, events, statuses
   output.ts          the output schema: JSON Schema out, the final answer parsed back
   resume.ts          SuspendedRun: the loop's state as JSON, and the calls it is waiting on
+  handoff.ts         handoffTool: a nested agent behind one tool, traced under its call
   budget.ts          BudgetLedger: what a run has spent, and whether the next call fits
   memory.ts          ConversationMemory: token budget, turn-wise trimming, summariser hook
   trace.ts           Tracer / runs / spans, usage + cost, Memory and Console exporters
@@ -444,7 +528,7 @@ src/
     anthropic.ts     the only file importing @anthropic-ai/sdk
     openai-compatible.ts  the same port over POST /chat/completions, on fetch
     fake.ts          scripted provider + builders for tests
-tests/               169 tests, no network, no API key
+tests/               185 tests, no network, no API key
 ```
 
 ## SSE
@@ -488,5 +572,7 @@ ANTHROPIC_API_KEY=… node -e '…'   # or `ant auth login`; the SDK picks eithe
 
 - **A store.** A suspended run hands its state back and traces go to an
   exporter; where either lands is your call.
-- **A planner or multi-agent orchestration.** This is the runtime one agent
-  runs on. Orchestration is a layer above it.
+- **A planner or a router.** `handoffTool` nests one agent inside another's
+  tool call, and that is the whole of it: there is no graph, no supervisor and
+  nothing that decides which agent should answer. Which agent to hand to is a
+  tool the model picks, and anything more is a layer above this one.

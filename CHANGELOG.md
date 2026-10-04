@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-04
+
+- Sub-agent handoff: `handoffTool({ name, description, ...AgentOptions })` — a tool that runs a nested agent with its own provider and tools and returns its final text, with the nested run's spans under the parent trace and its cost rolled up into the same totals, so delegating keeps the sub-agent's tools and intermediate steps out of the parent's context window while a trace still shows what the whole handoff cost.
+
 ## 2026-10-03
 
 - Resumable runs: loop state (transcript, iteration, pending approval) serializes as JSON, so a run paused by `beforeToolCall → { ask: true }` stops with status `suspended` and `resumeAgent` finishes it in another process — running only the calls that were waiting, with the iterations, tokens and budget already spent still counted — with an example in the README hosting a run inside a durable-workflow step.
