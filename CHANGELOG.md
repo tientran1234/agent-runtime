@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-05
+
+- Context editing: opt-in `contextEditing: { clearToolUsesAfter: N }` sends only the N most recent tool results in full — on the Anthropic adapter as the API's own `context_management` edit, and as an equivalent in-memory strategy for every other provider — so a long tool loop stays inside its window without `result.messages`, the trace or a suspended run losing what the tools returned.
+
 ## 2026-10-04
 
 - Sub-agent handoff: `handoffTool({ name, description, ...AgentOptions })` — a tool that runs a nested agent with its own provider and tools and returns its final text, with the nested run's spans under the parent trace and its cost rolled up into the same totals, so delegating keeps the sub-agent's tools and intermediate steps out of the parent's context window while a trace still shows what the whole handoff cost.

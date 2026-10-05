@@ -57,6 +57,11 @@ result.usage;    // tokens across every model call
   message. Splitting them across messages quietly trains the model to stop
   parallelising. A tool given `maxConcurrency` queues its own calls without
   holding up any other tool's.
+- **A long run narrows the request, never the transcript.** With
+  `contextEditing: { clearToolUsesAfter: N }` only the N most recent tool
+  results are sent in full and the older ones go over as a placeholder.
+  `result.messages` still holds every one of them, so what a tool returned is
+  not lost to having stayed inside a window.
 - **A paused turn is resumed, not answered.** A provider that interrupts its
   own server-side work stops with `pause_turn`. That is an unfinished turn, so
   the loop hands it back to be finished, runs no tool inside it, and spends an
@@ -369,6 +374,31 @@ speaks and includes every tool call and result until the next human message.
 and its `tool_result` are never separated — which every provider rejects. An
 optional `summarize` hook folds dropped turns into a leading summary message.
 
+**Context editing edits the request, and memory edits the window.** The two
+are different cuts and they compose: `memory` decides which turns are in the
+window at all, `contextEditing` decides how much of the tool traffic inside
+that window goes over in full.
+
+```ts
+await runAgent({ provider, tools, input, contextEditing: { clearToolUsesAfter: 3 } });
+```
+
+A long tool loop runs out of window on its tool results rather than on the
+conversation — the page a search returned four turns ago is most of what each
+call carries and none of what the next answer needs. So the older results are
+replaced by a placeholder on the way out, and nowhere else: `result.messages`,
+the trace and a suspended run's snapshot all keep what the tool actually
+returned, because the transcript is what the caller is handed back and clearing
+a request is not allowed to cost that. What never goes is the `tool_result`
+block itself — a `tool_use` missing its result is a 400 from every provider, so
+only the content is cleared and the pairing survives. On the Anthropic adapter
+this is the API's own `clear_tool_uses_20250919` edit and the clearing happens
+server-side, which saves sending the results at all; `ModelProvider.editsContext`
+is how an adapter says so, and the loop then leaves the request whole rather
+than clearing it twice. Every other provider — the OpenAI-compatible one, a
+local model, a fake — gets the same option honoured locally, which is what makes
+it worth setting before you know where the run will end up.
+
 **Cost is computed, and "unknown" stays unknown.** Each model span records
 usage and looks up the price for the model that actually answered (which
 matters once fallback is involved). A model missing from the price table makes
@@ -518,6 +548,7 @@ src/
   handoff.ts         handoffTool: a nested agent behind one tool, traced under its call
   budget.ts          BudgetLedger: what a run has spent, and whether the next call fits
   memory.ts          ConversationMemory: token budget, turn-wise trimming, summariser hook
+  context.ts         clearToolUses: old tool results out of the request, transcript intact
   trace.ts           Tracer / runs / spans, usage + cost, Memory and Console exporters
   pricing.ts         per-model prices, costUsd()
   fallback.ts        FallbackProvider
@@ -528,7 +559,7 @@ src/
     anthropic.ts     the only file importing @anthropic-ai/sdk
     openai-compatible.ts  the same port over POST /chat/completions, on fetch
     fake.ts          scripted provider + builders for tests
-tests/               185 tests, no network, no API key
+tests/               202 tests, no network, no API key
 ```
 
 ## SSE
