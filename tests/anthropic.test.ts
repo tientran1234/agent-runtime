@@ -1,6 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { describe, expect, it } from "vitest";
-import { AnthropicProvider, SERVER_FALLBACK_BETA, fromMessage, toMessageParams, toOutputConfig, toProviderError, toSystem, toTools } from "../src/providers/anthropic.js";
+import { AnthropicProvider, CONTEXT_MANAGEMENT_BETA, SERVER_FALLBACK_BETA, fromMessage, toContextManagement, toMessageParams, toOutputConfig, toProviderError, toSystem, toTools } from "../src/providers/anthropic.js";
 import type { AnthropicProviderOptions } from "../src/providers/anthropic.js";
 import { ProviderError } from "../src/index.js";
 import type { ToolSpec } from "../src/index.js";
@@ -321,5 +321,70 @@ describe("server-side tools", () => {
     } as unknown as Anthropic.Message;
 
     expect(fromMessage(message).content).toEqual([{ type: "text", text: "ok" }]);
+  });
+});
+
+describe("context editing", () => {
+  /** One request through the stub: which endpoint it went to, and what it carried. */
+  async function send(contextEditing?: { clearToolUsesAfter: number }, options: AnthropicProviderOptions = {}) {
+    let params: SentParams | undefined;
+    let endpoint: Endpoint | undefined;
+    const provider = new AnthropicProvider({
+      ...options,
+      client: stubClient((sent, via) => {
+        params = sent;
+        endpoint = via;
+      }),
+    });
+    await provider.complete({
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      ...(contextEditing ? { contextEditing } : {}),
+    });
+    return { endpoint, params: params! };
+  }
+
+  it("asks for nothing, on the plain endpoint, when nobody asked for editing", async () => {
+    const { endpoint, params } = await send();
+    expect(endpoint).toBe("messages");
+    expect(params).not.toHaveProperty("context_management");
+    expect(params).not.toHaveProperty("betas");
+  });
+
+  it("sends the clear_tool_uses edit under the beta that gates it", async () => {
+    const { endpoint, params } = await send({ clearToolUsesAfter: 3 });
+    expect(endpoint).toBe("beta.messages");
+    expect(params.betas).toEqual([CONTEXT_MANAGEMENT_BETA]);
+    expect(CONTEXT_MANAGEMENT_BETA).toBe("context-management-2025-06-27");
+    expect(params.context_management).toEqual({
+      edits: [
+        {
+          type: "clear_tool_uses_20250919",
+          trigger: { type: "tool_uses", value: 3 },
+          keep: { type: "tool_uses", value: 3 },
+        },
+      ],
+    });
+  });
+
+  it("pins the trigger to the window, so clearing starts where it does locally", () => {
+    // The API's own default trigger is an input-token threshold: left unset,
+    // `clearToolUsesAfter` would hold on this provider only once a prompt got
+    // big, and on every other one from the first call past the window.
+    const config = toContextManagement({ clearToolUsesAfter: 5 });
+    const edit = config?.edits?.[0] as { trigger?: unknown; keep?: unknown };
+    expect(edit.trigger).toEqual(edit.keep);
+    expect(toContextManagement()).toBeUndefined();
+  });
+
+  it("carries both betas when a run wants fallbacks as well", async () => {
+    const { endpoint, params } = await send({ clearToolUsesAfter: 2 }, { serverFallbacks: true });
+    expect(endpoint).toBe("beta.messages");
+    expect(params.betas).toEqual([SERVER_FALLBACK_BETA, CONTEXT_MANAGEMENT_BETA]);
+    expect(params.fallbacks).toBe("default");
+    expect(params.context_management).toBeDefined();
+  });
+
+  it("reports that it edits context, which is what keeps the loop from doing it too", () => {
+    expect(new AnthropicProvider({ client: stubClient(() => {}) }).editsContext).toBe(true);
   });
 });

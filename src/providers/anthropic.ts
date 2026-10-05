@@ -8,6 +8,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import {
   ProviderError,
   type ChatMessage,
+  type ContextEditing,
   type ModelProvider,
   type ModelRequest,
   type ModelResponse,
@@ -23,6 +24,9 @@ export type Effort = "low" | "medium" | "high" | "xhigh" | "max";
  * earlier header with `"default"`, is a 400 either way.
  */
 export const SERVER_FALLBACK_BETA = "server-side-fallback-2026-07-01";
+
+/** The beta that gates `context_management`. */
+export const CONTEXT_MANAGEMENT_BETA = "context-management-2025-06-27";
 
 export interface AnthropicProviderOptions {
   client?: Anthropic;
@@ -61,6 +65,8 @@ export interface AnthropicProviderOptions {
 
 export class AnthropicProvider implements ModelProvider {
   readonly name = "anthropic";
+  /** `context_management` is the API's own, so the loop leaves the request whole. */
+  readonly editsContext = true;
   readonly model: string;
   private readonly client: Anthropic;
   private readonly maxTokens: number;
@@ -90,6 +96,7 @@ export class AnthropicProvider implements ModelProvider {
       // Effort and the output format share one field, so they are built together
       // — set apart, whichever came second would drop the other.
       const outputConfig = toOutputConfig(this.effort, request.outputSchema);
+      const contextManagement = toContextManagement(request.contextEditing);
       const params = {
         model: this.model,
         max_tokens: this.maxTokens,
@@ -100,13 +107,25 @@ export class AnthropicProvider implements ModelProvider {
         ...(outputConfig ? { output_config: outputConfig } : {}),
       };
       const options = request.signal ? { signal: request.signal } : undefined;
+      // Whatever needs a header goes to the beta endpoint together — the two
+      // features are unrelated, but a request may want both and there is only
+      // one `betas` to carry them.
+      const betas = [
+        ...(this.serverFallbacks ? [SERVER_FALLBACK_BETA] : []),
+        ...(contextManagement ? [CONTEXT_MANAGEMENT_BETA] : []),
+      ];
       // Always stream: a long answer then cannot hit the HTTP timeout, and
       // finalMessage() gives back the complete Message either way. Each branch
       // drains its own stream because the two endpoints' helpers are unrelated
       // types, and a union of them has no callable `on`.
-      if (this.serverFallbacks) {
+      if (betas.length > 0) {
         const stream = this.client.beta.messages.stream(
-          { ...params, betas: [SERVER_FALLBACK_BETA], fallbacks: "default" },
+          {
+            ...params,
+            betas,
+            ...(this.serverFallbacks ? { fallbacks: "default" as const } : {}),
+            ...(contextManagement ? { context_management: contextManagement } : {}),
+          },
           options,
         );
         if (request.onTextDelta) stream.on("text", request.onTextDelta);
@@ -179,6 +198,27 @@ export function toOutputConfig(effort?: Effort, outputSchema?: Record<string, un
   return {
     ...(effort ? { effort } : {}),
     ...(outputSchema ? { format: { type: "json_schema" as const, schema: outputSchema } } : {}),
+  };
+}
+
+/**
+ * `contextEditing` as the edit the API knows, or nothing when none was asked
+ * for. `trigger` is pinned to the same count as `keep` so clearing starts
+ * where the in-memory strategy starts it: left to its own default the API
+ * waits on an input-token threshold instead, and `clearToolUsesAfter` would
+ * then mean one thing here and another on every other provider.
+ */
+export function toContextManagement(editing?: ContextEditing): Anthropic.Beta.BetaContextManagementConfig | undefined {
+  if (!editing) return undefined;
+  const value = editing.clearToolUsesAfter;
+  return {
+    edits: [
+      {
+        type: "clear_tool_uses_20250919",
+        trigger: { type: "tool_uses", value },
+        keep: { type: "tool_uses", value },
+      },
+    ],
   };
 }
 

@@ -32,4 +32,17 @@ describe("FallbackProvider", () => {
     const b = new FakeProvider([new ProviderError("b down", true)], "b");
     await expect(new FallbackProvider([a, b]).complete({ messages: [] })).rejects.toThrow("b down");
   });
+
+  it("reports editing context only when every provider in the chain does", () => {
+    /** A provider with `context_management` of its own, like the Anthropic one. */
+    class ServerSideEditing extends FakeProvider {
+      readonly editsContext = true;
+    }
+    const editing = new ServerSideEditing([reply("ok")], "model-a");
+    const plain = new FakeProvider([reply("ok")], "model-b");
+    expect(new FallbackProvider([editing]).editsContext).toBe(true);
+    // The request is built before anyone knows who will answer it, so a chain
+    // that might land on `plain` has to be edited locally for all of it.
+    expect(new FallbackProvider([editing, plain]).editsContext).toBe(false);
+  });
 });

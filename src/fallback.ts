@@ -26,6 +26,16 @@ export class FallbackProvider implements ModelProvider {
     return this.providers[0]!.model;
   }
 
+  /**
+   * Only when every provider in the chain edits context itself. The request is
+   * built once, before anyone knows which of them will answer it, so one
+   * provider that cannot do the editing means the loop has to do it for all of
+   * them — and over-reporting here would leave that chain unedited.
+   */
+  get editsContext(): boolean {
+    return this.providers.every((p) => p.editsContext === true);
+  }
+
   async complete(request: ModelRequest): Promise<ModelResponse> {
     const shouldFallback = this.options.shouldFallback ?? ((e) => e instanceof ProviderError && e.retryable);
     let lastError: unknown;

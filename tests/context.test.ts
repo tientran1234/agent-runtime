@@ -52,7 +52,10 @@ describe("clearToolUses", () => {
 
   it("clears the content and never the pairing", () => {
     const edited = clearToolUses(transcript, { clearToolUsesAfter: 0 });
-    const ids = edited.flatMap((m) => (m.role === "user" ? m.content : [])).map((p) => (p.type === "tool_result" ? p.toolUseId : null));
+    const ids = edited
+      .flatMap((m) => (m.role === "user" ? m.content : []))
+      .filter((p) => p.type === "tool_result")
+      .map((p) => (p.type === "tool_result" ? p.toolUseId : ""));
     // A tool_use whose tool_result went missing is a 400, so clearing a result
     // may not drop the block it lives in.
     expect(ids).toEqual(["t1", "t2"]);

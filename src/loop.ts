@@ -11,6 +11,7 @@ import {
   type ToolOutcome,
 } from "./tools.js";
 import { BudgetLedger, type BudgetOptions } from "./budget.js";
+import { clearToolUses } from "./context.js";
 import type { ConversationMemory } from "./memory.js";
 import { parseOutput, repairRequest, toOutputSchema } from "./output.js";
 import { awaitingCalls, turnCalls, type SuspendedRun } from "./resume.js";
@@ -210,6 +211,10 @@ async function loop<S extends z.ZodType>(
     if (Number.isFinite(tool.maxConcurrency)) limits.set(tool.name, semaphore(tool.maxConcurrency));
   }
   const outputSchema = options.output ? toOutputSchema(options.output) : undefined;
+  // One side clears or the other does, never both: a second pass would count
+  // what the first left against a window that has already been applied.
+  const serverEdit = options.provider.editsContext === true ? options.contextEditing : undefined;
+  const localEdit = serverEdit ? undefined : options.contextEditing;
   // Only when a cap was asked for: an unbudgeted run should not pay to be
   // measured. The tracer's price table is what the cap is priced against, so a
   // deployment's own rates bind the budget as well as the trace.
@@ -360,7 +365,10 @@ async function loop<S extends z.ZodType>(
 
       // A snapshot, so a provider that keeps the request (a fake, a logger)
       // does not see later turns appear inside it.
-      const messages = options.memory ? await options.memory.window() : transcript.slice();
+      const history = options.memory ? await options.memory.window() : transcript.slice();
+      // Cleared on the way out and nowhere else: `transcript` is what the
+      // caller is handed back, so the full results stay there.
+      const messages = localEdit ? clearToolUses(history, localEdit) : history;
       const span = run?.startSpan("model.call", options.provider.model, { iteration: iterations });
       let response: ModelResponse;
       try {
@@ -369,6 +377,7 @@ async function loop<S extends z.ZodType>(
           messages,
           ...(specs ? { tools: specs } : {}),
           ...(outputSchema ? { outputSchema } : {}),
+          ...(serverEdit ? { contextEditing: serverEdit } : {}),
           ...(options.signal ? { signal: options.signal } : {}),
           onTextDelta: (text) => emit({ type: "text_delta", text }),
         });
