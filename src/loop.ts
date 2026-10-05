@@ -20,6 +20,7 @@ import {
   addUsage,
   textOf,
   type ChatMessage,
+  type ContextEditing,
   type ModelProvider,
   type ModelResponse,
   type ToolResultPart,
@@ -77,6 +78,20 @@ export interface AgentOptions<S extends z.ZodType = z.ZodNever> extends BudgetOp
   /** Hard cap on model calls. Default 10. The loop has to end even if the model never says so. */
   maxIterations?: number;
   memory?: ConversationMemory;
+  /**
+   * Opt in to clearing old tool results out of what each call carries:
+   * `{ clearToolUsesAfter: N }` sends the N most recent tool results in full
+   * and the rest as a placeholder. `result.messages` still holds every one of
+   * them, because what is edited is the copy of the conversation the call takes
+   * — a trace, a resumed run and the caller all still see what the tools
+   * returned.
+   *
+   * It is not `memory`, and the two compose: memory decides which turns are in
+   * the window at all, this decides how much of the tool traffic inside that
+   * window goes over in full. A provider that edits context on its own side is
+   * asked to do it there; every other one has the loop do it.
+   */
+  contextEditing?: ContextEditing;
   tracer?: Tracer;
   runName?: string;
   /**

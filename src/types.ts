@@ -74,6 +74,17 @@ export interface ModelResponse {
   usage: Usage;
 }
 
+/**
+ * How much of the tool traffic a request still carries in full. With
+ * `clearToolUsesAfter: N` only the N most recent tool uses keep their results;
+ * older ones go over as a placeholder. It is an edit to what one call sends,
+ * never to the conversation itself — the transcript keeps every result.
+ */
+export interface ContextEditing {
+  /** Tool uses kept in full, counted from the most recent. `0` clears them all. */
+  clearToolUsesAfter: number;
+}
+
 export interface ModelRequest {
   system?: string;
   messages: ChatMessage[];
@@ -85,6 +96,13 @@ export interface ModelRequest {
    * with nothing to map this to may ignore it.
    */
   outputSchema?: Record<string, unknown>;
+  /**
+   * Clearing the request should have applied before it was sent. It only
+   * arrives at a provider that reports `editsContext`, because the loop does
+   * it locally for one that does not — so an adapter either honours this or
+   * never sees it.
+   */
+  contextEditing?: ContextEditing;
   signal?: AbortSignal;
   /** Called with each text chunk as it streams. Optional: providers may stream regardless. */
   onTextDelta?: (text: string) => void;
@@ -93,6 +111,13 @@ export interface ModelRequest {
 export interface ModelProvider {
   readonly name: string;
   readonly model: string;
+  /**
+   * Set by a provider that applies `ModelRequest.contextEditing` on its own
+   * side. Left unset, the loop clears the copy it sends instead, which is what
+   * makes the option mean the same thing whoever answers. The two are never
+   * both done: clearing twice counts what is left against two windows.
+   */
+  readonly editsContext?: boolean;
   complete(request: ModelRequest): Promise<ModelResponse>;
 }
 

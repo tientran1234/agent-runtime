@@ -28,6 +28,8 @@ export type { BudgetOptions, BudgetState } from "./budget.js";
 export { ConversationMemory, splitTurns } from "./memory.js";
 export type { MemoryOptions } from "./memory.js";
 
+export { CLEARED_TOOL_RESULT, clearToolUses } from "./context.js";
+
 export { Tracer, MemoryExporter, ConsoleExporter } from "./trace.js";
 export type { Run, RunTotals, Span, SpanHandle, SpanKind, SpanParent, TraceExporter, TracerOptions } from "./trace.js";
 
@@ -48,6 +50,7 @@ export { ProviderError, EMPTY_USAGE, addUsage, textOf } from "./types.js";
 export type {
   AssistantPart,
   ChatMessage,
+  ContextEditing,
   ModelProvider,
   ModelRequest,
   ModelResponse,
