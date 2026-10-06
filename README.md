@@ -404,6 +404,37 @@ usage and looks up the price for the model that actually answered (which
 matters once fallback is involved). A model missing from the price table makes
 the run's total `null`, not a quietly smaller number.
 
+**Traces ship as OTLP, without an OpenTelemetry SDK.** `OtelExporter` posts
+each finished run to OTLP/HTTP, the one ingest path Tempo, Jaeger and every
+collector take out of the box, with the run as the root span and its spans
+beneath it — so a handoff's nesting arrives as nesting.
+
+```ts
+const tracer = new Tracer({
+  exporters: [new OtelExporter({ endpoint: "http://localhost:4318", serviceName: "support-bot" })],
+});
+```
+
+Model and tool spans go over under the GenAI semantic conventions a backend
+already groups by: `gen_ai.request.model` and `gen_ai.response.model`, which
+differ once a fallback answered, `gen_ai.usage.input_tokens`,
+`gen_ai.usage.output_tokens`, `gen_ai.tool.name`. Cache tokens and cost have no
+convention yet and go under `agent_runtime.*`, as do the loop's own attributes,
+prefixed so `stopReason` cannot land on a name a convention means something
+else by. An unpriced model leaves the cost attribute off, for the same reason
+the total goes `null`.
+
+There is no `@opentelemetry` dependency. A tracer that already models runs and
+spans would otherwise carry a second one that models them differently, and the
+mapping is one exported function — `toOtlpTraces(run)` — for a deployment that
+ships through a queue or a sidecar instead.
+
+A failed export is reported to `onError`, never thrown. `end()` awaits its
+exporters, so an exception there would make every run that finished while the
+collector was down read as a run that failed. The same reason it reads the
+`partialSuccess` body of a 200: a collector that took the request and kept half
+the spans would otherwise look like one that took all of them.
+
 **A budget is checked before the call, which means forecasting it.**
 `maxCostUsd` and `maxInputTokens` cap the whole run, and the cap is asked about
 at the one moment a call can still be not made.
@@ -550,6 +581,7 @@ src/
   memory.ts          ConversationMemory: token budget, turn-wise trimming, summariser hook
   context.ts         clearToolUses: old tool results out of the request, transcript intact
   trace.ts           Tracer / runs / spans, usage + cost, Memory and Console exporters
+  otel.ts            OtelExporter: the same runs as OTLP/HTTP JSON, for a collector
   pricing.ts         per-model prices, costUsd()
   fallback.ts        FallbackProvider
   sse.ts             agentSSE(): the run as a text/event-stream Response
@@ -559,7 +591,7 @@ src/
     anthropic.ts     the only file importing @anthropic-ai/sdk
     openai-compatible.ts  the same port over POST /chat/completions, on fetch
     fake.ts          scripted provider + builders for tests
-tests/               202 tests, no network, no API key
+tests/               221 tests, no network, no API key
 ```
 
 ## SSE

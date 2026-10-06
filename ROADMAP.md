@@ -21,4 +21,4 @@ Same rule: one item per change, in order.
 - [x] Resumable runs: serialize loop state (transcript, iteration, pending approval) so a run paused by `beforeToolCall → "ask"` resumes in another process; an example hosting a run inside a durable-workflow step.
 - [x] Sub-agent handoff: `handoffTool({ name, description, ...AgentOptions })` — a tool that runs a nested agent with its own provider and tools and returns its final text; nested spans under the parent trace with cost rolled up.
 - [x] Context editing: opt-in `contextEditing: { clearToolUsesAfter: N }` — on the Anthropic adapter via `context_management`, and an equivalent in-memory strategy for other providers; test that old tool results disappear from the request while the transcript stays intact.
-- [ ] OpenTelemetry exporter: `OtelExporter({ endpoint })` mapping runs and spans to OTLP/HTTP JSON so traces land in Tempo or Jaeger; span attributes for model, tokens, cost, tool name.
+- [x] OpenTelemetry exporter: `OtelExporter({ endpoint })` mapping runs and spans to OTLP/HTTP JSON so traces land in Tempo or Jaeger; span attributes for model, tokens, cost, tool name.

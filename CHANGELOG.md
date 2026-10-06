@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-06
+
+- OpenTelemetry exporter: `OtelExporter({ endpoint })` maps runs and spans to OTLP/HTTP JSON so traces land in Tempo or Jaeger, with the run as the root span and span attributes for model, tokens, cost and tool name under the GenAI semantic conventions — and a failed export reported rather than thrown, because a collector that is down must not turn a finished run into a failed one.
+
 ## 2026-10-05
 
 - Context editing: opt-in `contextEditing: { clearToolUsesAfter: N }` sends only the N most recent tool results in full — on the Anthropic adapter as the API's own `context_management` edit, and as an equivalent in-memory strategy for every other provider — so a long tool loop stays inside its window without `result.messages`, the trace or a suspended run losing what the tools returned.
