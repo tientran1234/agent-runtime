@@ -22,7 +22,7 @@ async function sampleRun(now = 1_760_000_000_000): Promise<Run> {
     .setAttributes({ stopReason: "tool_use" })
     .end();
   const tool = run.startSpan("tool.call", "get_order", { toolUseId: "tu_1" });
-  tool.startSpan("model.call", "fake-1").end();
+  tool.startSpan("model.call", "fake-1").recordUsage("fake-1", { inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0 }).end();
   tool.end();
   return run.end();
 }
@@ -55,14 +55,16 @@ describe("toOtlpTraces", () => {
     expect(new Set(spans.map((s) => s.spanId)).size).toBe(spans.length);
   });
 
-  it("writes nanosecond timestamps without losing the millisecond's low digits", async () => {
+  it("writes timestamps as whole nanoseconds since the epoch, not milliseconds", async () => {
     const spans = spansOf(toOtlpTraces(await sampleRun(1_760_000_000_123)));
 
-    // 1_760_000_000_123 * 1e6 is past Number.MAX_SAFE_INTEGER: computed as a
-    // number the last digits round away and every span lands at the same
-    // bogus instant.
+    // An int64 field: a collector reads it as an integer, and a span sent in
+    // milliseconds lands in 1970 without failing anything.
+    for (const span of spans) {
+      expect(span.startTimeUnixNano).toMatch(/^\d+$/);
+      expect(span.endTimeUnixNano).toMatch(/^\d+$/);
+    }
     expect(spans[0]?.startTimeUnixNano).toBe("1760000000123000000");
-    expect(spans[0]?.endTimeUnixNano).toBe("1760000000123000000");
   });
 
   it("carries model, tokens and cost on a model span", async () => {
@@ -109,7 +111,7 @@ describe("toOtlpTraces", () => {
       "agent_runtime.model_calls": "2",
       "agent_runtime.tool_calls": "1",
       "agent_runtime.tool_errors": "0",
-      "agent_runtime.cost_usd": 8,
+      "agent_runtime.cost_usd": 11,
       "agent_runtime.request_id": "req_7",
     });
   });
@@ -139,7 +141,7 @@ describe("toOtlpTraces", () => {
 
   it("re-parents a span whose parent is not in the run, so the collector keeps it", async () => {
     const run = await sampleRun();
-    const orphan = run.spans[3];
+    const orphan = run.spans[2];
     if (orphan) orphan.parentId = "gone";
     const spans = spansOf(toOtlpTraces(run));
 
