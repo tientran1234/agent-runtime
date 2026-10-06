@@ -33,6 +33,9 @@ export { CLEARED_TOOL_RESULT, clearToolUses } from "./context.js";
 export { Tracer, MemoryExporter, ConsoleExporter } from "./trace.js";
 export type { Run, RunTotals, Span, SpanHandle, SpanKind, SpanParent, TraceExporter, TracerOptions } from "./trace.js";
 
+export { OTLP_SPAN_KIND, OTLP_STATUS, OtelExporter, toOtlpTraces } from "./otel.js";
+export type { OtelExporterOptions, OtlpAttribute, OtlpResourceOptions, OtlpSpan, OtlpTraces, OtlpValue } from "./otel.js";
+
 export { assertScenario, renderTranscript, runScenario } from "./regression.js";
 export type { Scenario, ScenarioReport, ScriptedTurn } from "./regression.js";
 
