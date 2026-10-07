@@ -22,3 +22,4 @@ Same rule: one item per change, in order.
 - [x] Sub-agent handoff: `handoffTool({ name, description, ...AgentOptions })` — a tool that runs a nested agent with its own provider and tools and returns its final text; nested spans under the parent trace with cost rolled up.
 - [x] Context editing: opt-in `contextEditing: { clearToolUsesAfter: N }` — on the Anthropic adapter via `context_management`, and an equivalent in-memory strategy for other providers; test that old tool results disappear from the request while the transcript stays intact.
 - [x] OpenTelemetry exporter: `OtelExporter({ endpoint })` mapping runs and spans to OTLP/HTTP JSON so traces land in Tempo or Jaeger; span attributes for model, tokens, cost, tool name.
+- [x] A store for a suspended run: `RunStore` (`put`/`get`/`delete`/`pending`) with `MemoryStore` and a crash-safe `FileStore` behind it, so resuming in another process does not start with every caller writing the same adapter.

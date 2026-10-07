@@ -161,7 +161,9 @@ const first = await runAgent({
 
 first.status;                     // "suspended" — refund_order has not run
 awaitingCalls(first.suspended!);  // [{ toolUseId: "toolu_1", name: "refund_order", input: { orderId: "ord_42" } }]
-await store.put(runId, first.suspended);
+
+const store = new FileStore("/var/lib/approvals");
+await store.put(runId, first.suspended!);
 ```
 
 ```ts
@@ -182,6 +184,22 @@ those are code, and a snapshot carrying them would only be readable by the
 process that wrote it, which is the opposite of the point. Resuming supplies
 them again, so a stored snapshot never pins a tool to the implementation that
 happened to suspend, and a week-old one still resumes against today's deploy.
+
+**Where it waits is a port, so neither half has to own the other.** `store`
+above is a `RunStore`: `put`, `get`, `delete` and `pending` over snapshots, with
+`MemoryStore` for a process whose approvals do not outlive it and `FileStore`
+for a host with somewhere to write. Both go through JSON rather than holding the
+object, which is what makes the in-memory one worth testing against — a
+snapshot a row could not have stored fails where the fake is used, and a caller
+that edits what it read has not edited what is stored. `FileStore` renames a
+temporary file over the target rather than writing in place, because a
+half-written snapshot is not untidy but fatal: it is the only copy of a run
+whose tools have not run, and there is nothing left to rebuild it from. A run id
+is a name and not a path in both of them, since the id comes from whoever owns
+the approval and a fake that accepts `..` where the disk would escape its
+directory is how a test stops predicting the deployment. Which table, bucket or
+queue a snapshot should really land in is still your call — the port is four
+methods over a value.
 
 A suspension takes the whole turn, not the one call. Its siblings have already
 run — all of a turn's calls go out together — so their results travel in the
@@ -576,6 +594,7 @@ src/
   loop.ts            runAgent — the bounded loop, events, statuses
   output.ts          the output schema: JSON Schema out, the final answer parsed back
   resume.ts          SuspendedRun: the loop's state as JSON, and the calls it is waiting on
+  store.ts           RunStore: where a snapshot waits — a map, or a directory, or yours
   handoff.ts         handoffTool: a nested agent behind one tool, traced under its call
   budget.ts          BudgetLedger: what a run has spent, and whether the next call fits
   memory.ts          ConversationMemory: token budget, turn-wise trimming, summariser hook
@@ -591,7 +610,7 @@ src/
     anthropic.ts     the only file importing @anthropic-ai/sdk
     openai-compatible.ts  the same port over POST /chat/completions, on fetch
     fake.ts          scripted provider + builders for tests
-tests/               221 tests, no network, no API key
+tests/               243 tests, no network, no API key
 ```
 
 ## SSE
@@ -633,8 +652,9 @@ ANTHROPIC_API_KEY=… node -e '…'   # or `ant auth login`; the SDK picks eithe
 
 ## What is deliberately not here
 
-- **A store.** A suspended run hands its state back and traces go to an
-  exporter; where either lands is your call.
+- **A database.** `RunStore` is four methods with a map and a directory behind
+  them, and traces go to an exporter. Which table, bucket or queue either one
+  really lands in is your call.
 - **A planner or a router.** `handoffTool` nests one agent inside another's
   tool call, and that is the whole of it: there is no graph, no supervisor and
   nothing that decides which agent should answer. Which agent to hand to is a

@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-07
+
+- A store for a suspended run: `RunStore` (`put`/`get`/`delete`/`pending`) with `MemoryStore` and a crash-safe `FileStore` behind it, both serializing through JSON and refusing a run id that is a path, so resuming in another process does not start with every caller writing the same adapter — and the in-memory one predicts what the real one will do instead of hiding it.
+
 ## 2026-10-06
 
 - OpenTelemetry exporter: `OtelExporter({ endpoint })` maps runs and spans to OTLP/HTTP JSON so traces land in Tempo or Jaeger, with the run as the root span and span attributes for model, tokens, cost and tool name under the GenAI semantic conventions — and a failed export reported rather than thrown, because a collector that is down must not turn a finished run into a failed one.
