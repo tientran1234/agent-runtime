@@ -1,3 +1,6 @@
+import { randomUUID } from "node:crypto";
+import { mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import type { SuspendedRun } from "./resume.js";
 
 /**
@@ -36,22 +39,105 @@ export interface RunStore {
   pending(): Promise<string[]>;
 }
 
+/** What `FileStore` names its files, and therefore what `pending` reads ids back out of. */
+const SUFFIX = ".json";
+
+/**
+ * A run id is a name, not a path. The ids come from whatever system owns the
+ * approval — a ticket number, a workflow id, a customer reference — and
+ * `FileStore` turns them into filenames, where a `..` or a slash would read and
+ * write outside the directory it was given. Leading dots go too, so that no id
+ * can collide with a dotfile or with the temporary names `put` writes under.
+ *
+ * Checked by every store rather than only the one that builds paths: an id that
+ * works against `MemoryStore` in a test has to work against the disk in a
+ * deployment, and a fake that is laxer than the real thing is how that stops
+ * being true.
+ */
+const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
+
+function assertRunId(runId: string): void {
+  if (RUN_ID.test(runId)) return;
+  throw new Error(
+    `run store: ${JSON.stringify(runId)} is not a usable run id — letters, digits, dot, dash and underscore, ` +
+      `starting with a letter or digit, up to 200 characters`,
+  );
+}
+
+/**
+ * Serialize before anything is stored. Both implementations here go through
+ * JSON rather than holding the object, which is what makes the in-memory one a
+ * faithful stand-in: a snapshot that would not have survived a row fails in the
+ * tests that use the fake instead of in the deployment that uses the row.
+ */
+function serialize(runId: string, state: SuspendedRun): string {
+  let json: string | undefined;
+  try {
+    json = JSON.stringify(state);
+  } catch (err) {
+    throw new Error(`run store: the snapshot for ${runId} is not JSON — ${err instanceof Error ? err.message : String(err)}`);
+  }
+  // `JSON.stringify` answers `undefined` rather than throwing for a value it
+  // cannot represent at all, which would otherwise be stored as the string
+  // "undefined" and read back as a corrupt run.
+  if (json === undefined) throw new Error(`run store: the snapshot for ${runId} is not JSON — ${String(state)} has no representation`);
+  return json;
+}
+
+/**
+ * Read a snapshot back, checking the one field that says whether this reader
+ * understands it. `version` is in the record for a reader that may be older
+ * than the writer, and here is where it has to be acted on: passed through
+ * unchecked, a shape from a later release reaches the loop as a
+ * half-understood object and fails somewhere that says nothing about why.
+ */
+function parse(runId: string, json: string): SuspendedRun {
+  let value: unknown;
+  try {
+    value = JSON.parse(json);
+  } catch (err) {
+    throw new Error(`run store: the snapshot for ${runId} did not parse — ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (typeof value !== "object" || value === null) {
+    throw new Error(`run store: the snapshot for ${runId} is ${value === null ? "null" : typeof value}, not a suspended run`);
+  }
+  const version = (value as { version?: unknown }).version;
+  if (version !== 1) {
+    throw new Error(`run store: the snapshot for ${runId} is version ${String(version)}, and this reader understands 1`);
+  }
+  return value as SuspendedRun;
+}
+
 /**
  * Holds every waiting run in a map. For tests, and for a single process whose
  * approvals do not outlive it.
  */
 export class MemoryStore implements RunStore {
-  async put(_runId: string, _state: SuspendedRun): Promise<void> {
-    throw new Error("MemoryStore: not implemented");
+  /** Kept as JSON, not as the object: see `serialize`, and the copy `get` owes its caller. */
+  private readonly rows = new Map<string, string>();
+
+  async put(runId: string, state: SuspendedRun): Promise<void> {
+    assertRunId(runId);
+    this.rows.set(runId, serialize(runId, state));
   }
-  async get(_runId: string): Promise<SuspendedRun | undefined> {
-    throw new Error("MemoryStore: not implemented");
+
+  async get(runId: string): Promise<SuspendedRun | undefined> {
+    assertRunId(runId);
+    const json = this.rows.get(runId);
+    // Parsed per read, so every caller gets its own value. Handing back one
+    // shared object would let a caller that edits what it read edit what is
+    // stored — a bug that cannot happen against a backend that returns bytes,
+    // which is exactly the class of bug a fake must not hide.
+    return json === undefined ? undefined : parse(runId, json);
   }
-  async delete(_runId: string): Promise<void> {
-    throw new Error("MemoryStore: not implemented");
+
+  async delete(runId: string): Promise<void> {
+    assertRunId(runId);
+    this.rows.delete(runId);
   }
+
   async pending(): Promise<string[]> {
-    throw new Error("MemoryStore: not implemented");
+    return [...this.rows.keys()];
   }
 }
 
@@ -62,16 +148,79 @@ export class MemoryStore implements RunStore {
  */
 export class FileStore implements RunStore {
   constructor(private readonly dir: string) {}
-  async put(_runId: string, _state: SuspendedRun): Promise<void> {
-    throw new Error("FileStore: not implemented");
+
+  /**
+   * Written to a temporary name in the same directory and renamed over the
+   * target, because a rename within a directory is atomic and a write is not. A
+   * process killed halfway through a write leaves a truncated file, and for a
+   * suspended run that is fatal rather than inconvenient: the snapshot is the
+   * only copy of a run whose tools have not run, so there is nothing to rebuild
+   * it from. Serializing first is the same promise one step earlier — a
+   * snapshot that is not JSON must not already have replaced the one that was.
+   */
+  async put(runId: string, state: SuspendedRun): Promise<void> {
+    assertRunId(runId);
+    const json = serialize(runId, state);
+    await mkdir(this.dir, { recursive: true });
+    // Same directory, so the rename cannot cross a filesystem and fall back to
+    // a copy; a random suffix, so two writers for one run do not share a
+    // half-written file.
+    const temp = join(this.dir, `.${runId}.${randomUUID()}.tmp`);
+    try {
+      await writeFile(temp, json, "utf8");
+      await rename(temp, this.path(runId));
+    } catch (err) {
+      // Swept up rather than left to accumulate: a store that collects a file
+      // per failed write eventually fills the disk the next snapshot needs.
+      await rm(temp, { force: true });
+      throw err;
+    }
   }
-  async get(_runId: string): Promise<SuspendedRun | undefined> {
-    throw new Error("FileStore: not implemented");
+
+  async get(runId: string): Promise<SuspendedRun | undefined> {
+    assertRunId(runId);
+    let json: string;
+    try {
+      json = await readFile(this.path(runId), "utf8");
+    } catch (err) {
+      // No file is no run. Anything else — a permission, a dead mount — is a
+      // store that is not working, and must not read as a run that has gone.
+      if (isNotFound(err)) return undefined;
+      throw err;
+    }
+    return parse(runId, json);
   }
-  async delete(_runId: string): Promise<void> {
-    throw new Error("FileStore: not implemented");
+
+  async delete(runId: string): Promise<void> {
+    assertRunId(runId);
+    await rm(this.path(runId), { force: true });
   }
+
   async pending(): Promise<string[]> {
-    throw new Error("FileStore: not implemented");
+    let names: string[];
+    try {
+      names = await readdir(this.dir);
+    } catch (err) {
+      // A directory that nothing has suspended into yet is an empty store, not
+      // a broken one: `put` is what creates it.
+      if (isNotFound(err)) return [];
+      throw err;
+    }
+    // Only names this store would have written itself. A directory is shared
+    // with whatever else lands in it — an operator's notes, an editor's swap
+    // file, a temporary name from a write that died — and none of those is a
+    // run id that `get` should then be asked for.
+    return names
+      .filter((name) => name.endsWith(SUFFIX))
+      .map((name) => name.slice(0, -SUFFIX.length))
+      .filter((id) => RUN_ID.test(id));
   }
+
+  private path(runId: string): string {
+    return join(this.dir, `${runId}${SUFFIX}`);
+  }
+}
+
+function isNotFound(err: unknown): boolean {
+  return (err as { code?: unknown } | null)?.code === "ENOENT";
 }
