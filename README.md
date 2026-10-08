@@ -187,19 +187,40 @@ happened to suspend, and a week-old one still resumes against today's deploy.
 
 **Where it waits is a port, so neither half has to own the other.** `store`
 above is a `RunStore`: `put`, `get`, `delete` and `pending` over snapshots, with
-`MemoryStore` for a process whose approvals do not outlive it and `FileStore`
-for a host with somewhere to write. Both go through JSON rather than holding the
-object, which is what makes the in-memory one worth testing against — a
-snapshot a row could not have stored fails where the fake is used, and a caller
-that edits what it read has not edited what is stored. `FileStore` renames a
-temporary file over the target rather than writing in place, because a
-half-written snapshot is not untidy but fatal: it is the only copy of a run
-whose tools have not run, and there is nothing left to rebuild it from. A run id
-is a name and not a path in both of them, since the id comes from whoever owns
-the approval and a fake that accepts `..` where the disk would escape its
-directory is how a test stops predicting the deployment. Which table, bucket or
-queue a snapshot should really land in is still your call — the port is four
-methods over a value.
+`MemoryStore` for a process whose approvals do not outlive it, `FileStore`
+for a host with somewhere to write, and `SqlStore` for a row. All three go
+through JSON rather than holding the object, which is what makes the in-memory
+one worth testing against — a snapshot a row could not have stored fails where
+the fake is used, and a caller that edits what it read has not edited what is
+stored. `FileStore` renames a temporary file over the target rather than writing
+in place, because a half-written snapshot is not untidy but fatal: it is the
+only copy of a run whose tools have not run, and there is nothing left to
+rebuild it from. A run id is a name and not a path in all of them, since the id
+comes from whoever owns the approval and a fake that accepts `..` where the disk
+would escape its directory is how a test stops predicting the deployment.
+
+```ts
+// CREATE TABLE agent_runs (run_id TEXT PRIMARY KEY, snapshot TEXT NOT NULL);
+const store = new SqlStore({
+  query: (sql, params) => pool.query(sql, params).then((r) => r.rows),
+  dialect: "postgres",          // or "sqlite" / "mysql": the placeholder and the upsert
+});
+```
+
+`SqlStore` is the upsert, the two reads and the delete, and it stops there.
+What it does not take is a driver: `query` is a function you pass, so no pool is
+opened inside this library, nothing is depended on to open one, and the table
+arrives by whatever migration you already run. The statements are built once,
+when the store is, because a table name cannot be a parameter and so is the one
+part of a statement that is text — a name that is really a fragment of SQL
+fails where the store was built rather than on the first run that suspends.
+`put` is a single upsert rather than a read and a write, since a run that
+suspends twice is one run and two processes storing it must not interleave into
+a lost snapshot; `pending` hands back only ids this store could have written,
+because the table is yours and may hold rows a migration or an operator left.
+Which database that table lives in, and whether a snapshot should really land in
+a bucket or a queue instead, is still your call — the port is four methods over
+a value.
 
 A suspension takes the whole turn, not the one call. Its siblings have already
 run — all of a turn's calls go out together — so their results travel in the
@@ -594,7 +615,7 @@ src/
   loop.ts            runAgent — the bounded loop, events, statuses
   output.ts          the output schema: JSON Schema out, the final answer parsed back
   resume.ts          SuspendedRun: the loop's state as JSON, and the calls it is waiting on
-  store.ts           RunStore: where a snapshot waits — a map, or a directory, or yours
+  store.ts           RunStore: where a snapshot waits — a map, a directory, a row, or yours
   handoff.ts         handoffTool: a nested agent behind one tool, traced under its call
   budget.ts          BudgetLedger: what a run has spent, and whether the next call fits
   memory.ts          ConversationMemory: token budget, turn-wise trimming, summariser hook
@@ -610,7 +631,7 @@ src/
     anthropic.ts     the only file importing @anthropic-ai/sdk
     openai-compatible.ts  the same port over POST /chat/completions, on fetch
     fake.ts          scripted provider + builders for tests
-tests/               243 tests, no network, no API key
+tests/               257 tests, no network, no API key
 ```
 
 ## SSE
@@ -652,9 +673,10 @@ ANTHROPIC_API_KEY=… node -e '…'   # or `ant auth login`; the SDK picks eithe
 
 ## What is deliberately not here
 
-- **A database.** `RunStore` is four methods with a map and a directory behind
-  them, and traces go to an exporter. Which table, bucket or queue either one
-  really lands in is your call.
+- **A database.** `SqlStore` writes four statements and `query` is a function
+  you hand it, so nothing here opens a pool, depends on a driver or runs a
+  migration — and traces still go to an exporter. Which database, bucket or
+  queue either one really lands in is your call.
 - **A planner or a router.** `handoffTool` nests one agent inside another's
   tool call, and that is the whole of it: there is no graph, no supervisor and
   nothing that decides which agent should answer. Which agent to hand to is a

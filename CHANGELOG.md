@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-08
+
+- A SQL-backed `RunStore`: `SqlStore({ query, table, dialect })` writes an upsert, two reads and a delete over a query function the caller supplies, so a suspended run can wait in a row without this library opening a pool, depending on a driver or running a migration — held to the same contract tests as `MemoryStore` and `FileStore`, with the table name checked where the store is built because it is the one part of a statement that cannot be a parameter.
+
 ## 2026-10-07
 
 - A store for a suspended run: `RunStore` (`put`/`get`/`delete`/`pending`) with `MemoryStore` and a crash-safe `FileStore` behind it, both serializing through JSON and refusing a run id that is a path, so resuming in another process does not start with every caller writing the same adapter — and the in-memory one predicts what the real one will do instead of hiding it.
