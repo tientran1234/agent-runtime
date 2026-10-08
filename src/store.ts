@@ -279,18 +279,87 @@ const TABLE = /^[A-Za-z_][A-Za-z0-9_]{0,62}(\.[A-Za-z_][A-Za-z0-9_]{0,62})?$/;
  * run is read back by id and listed, and nothing here wants to query inside it.
  */
 export class SqlStore implements RunStore {
-  constructor(private readonly options: SqlStoreOptions) {}
+  private readonly query: SqlQuery;
+  /**
+   * Built once, in the constructor: the table and the dialect cannot change
+   * after that, and a statement assembled per call would be a place for a name
+   * to reach the database unchecked.
+   */
+  private readonly statements: { put: string; get: string; delete: string; pending: string };
 
-  async put(_runId: string, _state: SuspendedRun): Promise<void> {
-    throw new Error("SqlStore: not implemented");
+  constructor(options: SqlStoreOptions) {
+    const table = options.table ?? "agent_runs";
+    if (!TABLE.test(table)) {
+      throw new Error(
+        `run store: ${JSON.stringify(table)} is not a usable table name — letters, digits and underscore, ` +
+          `starting with a letter or underscore, optionally behind one schema qualifier`,
+      );
+    }
+    const dialect = options.dialect ?? "postgres";
+    this.query = options.query;
+    // Postgres numbers its placeholders; the other two do not. Nothing else
+    // about these statements is dialect-specific except the upsert's tail.
+    const slot = (n: number) => (dialect === "postgres" ? `$${n}` : "?");
+    const onConflict =
+      dialect === "mysql"
+        ? `ON DUPLICATE KEY UPDATE ${SNAPSHOT_COLUMN} = VALUES(${SNAPSHOT_COLUMN})`
+        : `ON CONFLICT (${ID_COLUMN}) DO UPDATE SET ${SNAPSHOT_COLUMN} = excluded.${SNAPSHOT_COLUMN}`;
+    this.statements = {
+      // An upsert rather than a read and then a write: a run that suspends, is
+      // answered `{ ask: true }` and suspends again is the same run waiting on a
+      // later decision, and two processes putting it must not be able to
+      // interleave into a lost snapshot.
+      put: `INSERT INTO ${table} (${ID_COLUMN}, ${SNAPSHOT_COLUMN}) VALUES (${slot(1)}, ${slot(2)}) ${onConflict}`,
+      get: `SELECT ${SNAPSHOT_COLUMN} FROM ${table} WHERE ${ID_COLUMN} = ${slot(1)}`,
+      delete: `DELETE FROM ${table} WHERE ${ID_COLUMN} = ${slot(1)}`,
+      pending: `SELECT ${ID_COLUMN} FROM ${table}`,
+    };
   }
-  async get(_runId: string): Promise<SuspendedRun | undefined> {
-    throw new Error("SqlStore: not implemented");
+
+  async put(runId: string, state: SuspendedRun): Promise<void> {
+    assertRunId(runId);
+    // Serialized before the statement goes out, so a snapshot JSON cannot carry
+    // has not already replaced the stored one that it could.
+    const json = serialize(runId, state);
+    await this.query(this.statements.put, [runId, json]);
   }
-  async delete(_runId: string): Promise<void> {
-    throw new Error("SqlStore: not implemented");
+
+  async get(runId: string): Promise<SuspendedRun | undefined> {
+    assertRunId(runId);
+    const rows = await this.query(this.statements.get, [runId]);
+    const row = rows[0];
+    // No row is no run, the same answer the other two give: polling for a
+    // decision that may already have been taken is how this is normally read.
+    if (row === undefined) return undefined;
+    const json = row[SNAPSHOT_COLUMN];
+    if (typeof json !== "string") {
+      // A `json` or `jsonb` column hands back a value already parsed, which has
+      // never been through the version check every read owes a stored snapshot.
+      // Said once here, rather than let a cast carry a column type nobody meant
+      // into the loop.
+      throw new Error(
+        `run store: the ${SNAPSHOT_COLUMN} column for ${runId} came back as ` +
+          `${json === null ? "null" : typeof json}, and this store stores JSON text — declare the column as text`,
+      );
+    }
+    return parse(runId, json);
   }
+
+  async delete(runId: string): Promise<void> {
+    assertRunId(runId);
+    // A statement that matches nothing is not an error: a resumed run may well
+    // be cleaned up twice, and the second attempt wants the first's outcome.
+    await this.query(this.statements.delete, [runId]);
+  }
+
   async pending(): Promise<string[]> {
-    throw new Error("SqlStore: not implemented");
+    const rows = await this.query(this.statements.pending, []);
+    // Only ids this store could have written, as `FileStore` filters the
+    // directory it was given. The table is the caller's and may hold rows from
+    // a migration, another writer or an operator's hand, and none of those is
+    // an id to hand back for `get` to be asked for.
+    return rows
+      .map((row) => row[ID_COLUMN])
+      .filter((id): id is string => typeof id === "string" && RUN_ID.test(id));
   }
 }
