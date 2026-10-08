@@ -7,12 +7,14 @@ import {
   FakeProvider,
   FileStore,
   MemoryStore,
+  SqlStore,
   callTools,
   defineTool,
   reply,
   resumeAgent,
   runAgent,
   type RunStore,
+  type SqlQuery,
   type SuspendedRun,
 } from "../src/index.js";
 
@@ -48,9 +50,41 @@ function unserializable(state: SuspendedRun): SuspendedRun {
   return circular;
 }
 
+/**
+ * A database that answers the four statements `SqlStore` writes, and nothing
+ * else. What the store has to be held to is which statements it sends and how
+ * it maps a snapshot either way; executing SQL is the driver's job, so the fake
+ * recognises the store's own statements rather than parsing them — and one it
+ * does not recognise fails loudly, because a store whose `put` quietly did
+ * nothing would otherwise pass every test below.
+ */
+function fakeDb(): { query: SqlQuery; sent: Array<{ sql: string; params: readonly string[] }> } {
+  const rows = new Map<string, string>();
+  const sent: Array<{ sql: string; params: readonly string[] }> = [];
+  const query: SqlQuery = async (sql, params) => {
+    sent.push({ sql, params });
+    if (sql.startsWith("INSERT")) {
+      rows.set(params[0]!, params[1]!);
+      return [];
+    }
+    if (sql.startsWith("SELECT snapshot")) {
+      const snapshot = rows.get(params[0]!);
+      return snapshot === undefined ? [] : [{ snapshot }];
+    }
+    if (sql.startsWith("DELETE")) {
+      rows.delete(params[0]!);
+      return [];
+    }
+    if (sql.startsWith("SELECT run_id")) return [...rows.keys()].map((run_id) => ({ run_id }));
+    throw new Error(`fake database: no answer for ${sql}`);
+  };
+  return { query, sent };
+}
+
 describe.each([
   { name: "MemoryStore", open: (_dir: string): RunStore => new MemoryStore() },
   { name: "FileStore", open: (dir: string): RunStore => new FileStore(join(dir, "runs")) },
+  { name: "SqlStore", open: (_dir: string): RunStore => new SqlStore({ query: fakeDb().query }) },
 ])("$name as a RunStore", ({ open }) => {
   let dir: string;
   let store: RunStore;
@@ -191,5 +225,94 @@ describe("FileStore", () => {
     await writeFile(join(runs, "run-42.json"), '{"version":1,"messages":[{"role":"use', "utf8");
 
     await expect(store.get("run-42")).rejects.toThrow(/run-42/);
+  });
+});
+
+describe("SqlStore", () => {
+  it("stores a snapshot as one upsert, because a run that suspends twice is one row", async () => {
+    const db = fakeDb();
+    const store = new SqlStore({ query: db.query });
+    const state = await suspend();
+    await store.put("run-42", state);
+
+    // One statement rather than a read and then a write: two processes putting
+    // the same run must not be able to interleave into a lost snapshot.
+    expect(db.sent).toHaveLength(1);
+    expect(db.sent[0]?.sql).toBe(
+      "INSERT INTO agent_runs (run_id, snapshot) VALUES ($1, $2) " +
+        "ON CONFLICT (run_id) DO UPDATE SET snapshot = excluded.snapshot",
+    );
+    // The id and the snapshot travel as parameters, never as statement text.
+    expect(db.sent[0]?.params).toEqual(["run-42", JSON.stringify(state)]);
+  });
+
+  it("reads, forgets and lists by id alone", async () => {
+    const db = fakeDb();
+    const store = new SqlStore({ query: db.query, table: "approvals.agent_runs" });
+    await store.get("run-42");
+    await store.delete("run-42");
+    await store.pending();
+
+    expect(db.sent.map((s) => s.sql)).toEqual([
+      "SELECT snapshot FROM approvals.agent_runs WHERE run_id = $1",
+      "DELETE FROM approvals.agent_runs WHERE run_id = $1",
+      "SELECT run_id FROM approvals.agent_runs",
+    ]);
+  });
+
+  it("spells the placeholder and the upsert the way the dialect does", async () => {
+    for (const { dialect, sql } of [
+      {
+        dialect: "sqlite" as const,
+        sql:
+          "INSERT INTO agent_runs (run_id, snapshot) VALUES (?, ?) " +
+          "ON CONFLICT (run_id) DO UPDATE SET snapshot = excluded.snapshot",
+      },
+      {
+        dialect: "mysql" as const,
+        sql:
+          "INSERT INTO agent_runs (run_id, snapshot) VALUES (?, ?) " +
+          "ON DUPLICATE KEY UPDATE snapshot = VALUES(snapshot)",
+      },
+    ]) {
+      const db = fakeDb();
+      const store = new SqlStore({ query: db.query, dialect });
+      await store.put("run-42", await suspend());
+      await store.get("run-42");
+
+      expect(db.sent[0]?.sql).toBe(sql);
+      expect(db.sent[1]?.sql).toBe("SELECT snapshot FROM agent_runs WHERE run_id = ?");
+    }
+  });
+
+  it("refuses a table name that is really a fragment of SQL, before any statement runs", async () => {
+    const db = fakeDb();
+    // A table name cannot be a parameter, so it is interpolated — and a store
+    // that accepted this one would send whatever followed it to the database.
+    for (const bad of ["agent_runs; DROP TABLE users", "agent runs", '"agent_runs"', "", "a.b.c", "1_runs"]) {
+      expect(() => new SqlStore({ query: db.query, table: bad })).toThrow(/not a usable table name/);
+    }
+    expect(db.sent).toEqual([]);
+  });
+
+  it("refuses a snapshot column that is not the JSON text it wrote", async () => {
+    // A `json` or `jsonb` column hands back a parsed value, which has never been
+    // through the version check a stored snapshot is read with. Rejecting it
+    // says so once, where a cast would hide a column type nobody meant.
+    for (const snapshot of [{ version: 1 }, null, 42]) {
+      const store = new SqlStore({ query: async () => [{ snapshot }] });
+      await expect(store.get("run-42")).rejects.toThrow(/snapshot column for run-42/);
+    }
+  });
+
+  it("ignores rows in the table it did not write", async () => {
+    const store = new SqlStore({
+      query: async () => [{ run_id: "run-1" }, { run_id: "../escape" }, { run_id: 42 }, { run_id: null }],
+    });
+
+    // The table is the caller's, and may hold rows from a migration, another
+    // tenant or an operator's hand. None of those is an id `get` should be
+    // asked for, so `pending` names only what this store could have stored.
+    expect(await store.pending()).toEqual(["run-1"]);
   });
 });

@@ -4,8 +4,8 @@ export type { AgentEvent, AgentOptions, AgentResult, AgentStatus, ResumeOptions 
 export { awaitingCalls } from "./resume.js";
 export type { AwaitingCall, SuspendedRun } from "./resume.js";
 
-export { FileStore, MemoryStore } from "./store.js";
-export type { RunStore } from "./store.js";
+export { FileStore, MemoryStore, SqlStore } from "./store.js";
+export type { RunStore, SqlDialect, SqlQuery, SqlRow, SqlStoreOptions } from "./store.js";
 
 export { handoffTool } from "./handoff.js";
 export type { HandoffOptions } from "./handoff.js";

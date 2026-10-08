@@ -23,3 +23,4 @@ Same rule: one item per change, in order.
 - [x] Context editing: opt-in `contextEditing: { clearToolUsesAfter: N }` — on the Anthropic adapter via `context_management`, and an equivalent in-memory strategy for other providers; test that old tool results disappear from the request while the transcript stays intact.
 - [x] OpenTelemetry exporter: `OtelExporter({ endpoint })` mapping runs and spans to OTLP/HTTP JSON so traces land in Tempo or Jaeger; span attributes for model, tokens, cost, tool name.
 - [x] A store for a suspended run: `RunStore` (`put`/`get`/`delete`/`pending`) with `MemoryStore` and a crash-safe `FileStore` behind it, so resuming in another process does not start with every caller writing the same adapter.
+- [ ] A SQL-backed `RunStore`: `SqlStore({ query, table, dialect })` over a query function the caller supplies, so a suspended run can wait in a row without this library picking a driver; held to the same contract tests as the other two.

@@ -224,3 +224,73 @@ export class FileStore implements RunStore {
 function isNotFound(err: unknown): boolean {
   return (err as { code?: unknown } | null)?.code === "ENOENT";
 }
+
+/**
+ * The one thing a store needs from a database: run this statement with these
+ * parameters, hand back the rows. A driver is not asked for and no pool is
+ * opened here — the caller writes the line that adapts theirs
+ * (`(sql, params) => pool.query(sql, params).then((r) => r.rows)` for
+ * node-postgres), which is what keeps a library that holds an agent loop from
+ * also holding an opinion about connections, retries and migrations.
+ */
+export type SqlQuery = (sql: string, params: readonly string[]) => Promise<readonly SqlRow[]>;
+
+/** A row as a driver hands it over: the column this store asked for, and whatever else came with it. */
+export type SqlRow = Record<string, unknown>;
+
+/**
+ * Which placeholder and which upsert the statements are written with. The four
+ * statements are otherwise identical across these three, and those two
+ * differences are the whole reason this is an option rather than one fixed
+ * string of SQL.
+ */
+export type SqlDialect = "postgres" | "sqlite" | "mysql";
+
+export interface SqlStoreOptions {
+  /** How a statement reaches the database. */
+  query: SqlQuery;
+  /**
+   * The table, `agent_runs` by default, with two columns: `run_id` as the
+   * primary key and `snapshot` as text. Which database, schema and migration
+   * it arrives by stays the caller's — this store only reads and writes it.
+   */
+  table?: string;
+  /** Default `postgres`. */
+  dialect?: SqlDialect;
+}
+
+/** The columns a store's table has. Named once because the statements and the errors both have to say them. */
+const ID_COLUMN = "run_id";
+const SNAPSHOT_COLUMN = "snapshot";
+
+/**
+ * A table name goes into the statement text, because no driver takes an
+ * identifier as a parameter — so it is checked against what an unquoted
+ * identifier may be, optionally behind one schema qualifier. The check is in
+ * the constructor rather than in `put`: a store built with a name that is
+ * really a fragment of SQL must fail where it was built, not on the first run
+ * that suspends into it.
+ */
+const TABLE = /^[A-Za-z_][A-Za-z0-9_]{0,62}(\.[A-Za-z_][A-Za-z0-9_]{0,62})?$/;
+
+/**
+ * A row per waiting run, in a table you already have. The snapshot is JSON
+ * text and the id is the primary key, which is the whole schema: a suspended
+ * run is read back by id and listed, and nothing here wants to query inside it.
+ */
+export class SqlStore implements RunStore {
+  constructor(private readonly options: SqlStoreOptions) {}
+
+  async put(_runId: string, _state: SuspendedRun): Promise<void> {
+    throw new Error("SqlStore: not implemented");
+  }
+  async get(_runId: string): Promise<SuspendedRun | undefined> {
+    throw new Error("SqlStore: not implemented");
+  }
+  async delete(_runId: string): Promise<void> {
+    throw new Error("SqlStore: not implemented");
+  }
+  async pending(): Promise<string[]> {
+    throw new Error("SqlStore: not implemented");
+  }
+}
