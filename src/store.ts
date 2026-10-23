@@ -56,6 +56,15 @@ const SUFFIX = ".json";
  */
 const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 
+/**
+ * How long an id the pattern above will accept, which is also how wide a
+ * column has to be declared to hold one. Named rather than left implicit in
+ * the pattern because `SqlStore.schema` has to say it: a column a character
+ * narrower than the ids every store accepts is a key stored truncated, on an
+ * id nobody reading the error will recognise as too long.
+ */
+const MAX_RUN_ID = 200;
+
 function assertRunId(runId: string): void {
   if (RUN_ID.test(runId)) return;
   throw new Error(
@@ -264,6 +273,24 @@ const ID_COLUMN = "run_id";
 const SNAPSHOT_COLUMN = "snapshot";
 
 /**
+ * How each dialect spells those two columns. Postgres and SQLite take `TEXT`
+ * for both and will index it; MySQL will not index a `TEXT` key without a
+ * prefix length, so its id is a `VARCHAR` as wide as a run id may be, and its
+ * `TEXT` holds 64 KiB, which a transcript carrying its tool results passes
+ * long before it is a remarkable run — so its snapshot is a `LONGTEXT`.
+ *
+ * Both of those are why this is worth handing back at all. A wrong key fails
+ * where the table is made and is obvious; a snapshot column too small does not
+ * fail there, it stores a run short, and that run is one whose tools have
+ * already had their side effect and which there is nothing left to rebuild.
+ */
+const COLUMN_TYPES: Record<SqlDialect, { id: string; snapshot: string }> = {
+  postgres: { id: "TEXT", snapshot: "TEXT" },
+  sqlite: { id: "TEXT", snapshot: "TEXT" },
+  mysql: { id: `VARCHAR(${MAX_RUN_ID})`, snapshot: "LONGTEXT" },
+};
+
+/**
  * A table name goes into the statement text, because no driver takes an
  * identifier as a parameter — so it is checked against what an unquoted
  * identifier may be, optionally behind one schema qualifier. The check is in
@@ -286,6 +313,8 @@ export class SqlStore implements RunStore {
    * to reach the database unchecked.
    */
   private readonly statements: { put: string; get: string; delete: string; pending: string };
+  /** Built with them, from the same table and columns, so the two cannot drift apart. */
+  private readonly ddl: string;
 
   constructor(options: SqlStoreOptions) {
     const table = options.table ?? "agent_runs";
@@ -314,6 +343,12 @@ export class SqlStore implements RunStore {
       delete: `DELETE FROM ${table} WHERE ${ID_COLUMN} = ${slot(1)}`,
       pending: `SELECT ${ID_COLUMN} FROM ${table}`,
     };
+    const types = COLUMN_TYPES[dialect];
+    // `IF NOT EXISTS` because the natural place to run this is on the way up,
+    // where a second boot must not be the one that fails.
+    this.ddl =
+      `CREATE TABLE IF NOT EXISTS ${table} ` +
+      `(${ID_COLUMN} ${types.id} PRIMARY KEY, ${SNAPSHOT_COLUMN} ${types.snapshot} NOT NULL)`;
   }
 
   async put(runId: string, state: SuspendedRun): Promise<void> {
@@ -365,7 +400,7 @@ export class SqlStore implements RunStore {
    * truncated.
    */
   schema(): string {
-    throw new Error("SqlStore: not implemented");
+    return this.ddl;
   }
 
   async pending(): Promise<string[]> {
