@@ -352,6 +352,22 @@ export class SqlStore implements RunStore {
     await this.query(this.statements.delete, [runId]);
   }
 
+  /**
+   * The `CREATE TABLE` these statements need, for the table and the dialect
+   * this store was built with.
+   *
+   * Handed back rather than run. A migration is the caller's to apply, review
+   * and roll back, and a store that ran its own would be opening the pool and
+   * taking the opinion about connections that `query` exists to keep out of
+   * here. What it saves is the transcription: the columns, their types and the
+   * key are this store's to know, and a caller copying them out of prose is
+   * the one who finds out which they got wrong from a snapshot that came back
+   * truncated.
+   */
+  schema(): string {
+    throw new Error("SqlStore: not implemented");
+  }
+
   async pending(): Promise<string[]> {
     const rows = await this.query(this.statements.pending, []);
     // Only ids this store could have written, as `FileStore` filters the

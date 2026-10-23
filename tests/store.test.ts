@@ -305,6 +305,44 @@ describe("SqlStore", () => {
     }
   });
 
+  it("hands back the create table its own statements read and write, without running it", async () => {
+    const db = fakeDb();
+    const store = new SqlStore({ query: db.query, table: "approvals.agent_runs" });
+
+    expect(store.schema()).toBe(
+      "CREATE TABLE IF NOT EXISTS approvals.agent_runs (run_id TEXT PRIMARY KEY, snapshot TEXT NOT NULL)",
+    );
+    // Handed over, not executed: a migration is the caller's to apply and roll
+    // back, and a store that ran its own would be opening the pool `query`
+    // exists to keep out of this library.
+    expect(db.sent).toEqual([]);
+  });
+
+  it("declares a key MySQL will index and a column a whole snapshot fits in", () => {
+    // MySQL indexes no `TEXT` key without a prefix length, and its `TEXT` stops
+    // at 64 KiB — which a transcript carrying its tool results passes long
+    // before it is a remarkable run. Either one wrong is not a statement that
+    // fails but a snapshot stored short, and a snapshot is the only copy of a
+    // run whose tools have not run.
+    expect(new SqlStore({ query: fakeDb().query, dialect: "mysql" }).schema()).toBe(
+      "CREATE TABLE IF NOT EXISTS agent_runs (run_id VARCHAR(200) PRIMARY KEY, snapshot LONGTEXT NOT NULL)",
+    );
+    expect(new SqlStore({ query: fakeDb().query, dialect: "sqlite" }).schema()).toBe(
+      "CREATE TABLE IF NOT EXISTS agent_runs (run_id TEXT PRIMARY KEY, snapshot TEXT NOT NULL)",
+    );
+  });
+
+  it("declares the id column as wide as the longest id it will accept", async () => {
+    const store = new SqlStore({ query: fakeDb().query, dialect: "mysql" });
+    const width = Number(/VARCHAR\((\d+)\)/.exec(store.schema())?.[1]);
+
+    // The declared width and the check in front of every statement have to
+    // agree: a column narrower than the ids this store accepts is a key stored
+    // truncated, and a wider one is a column holding ids `get` will not ask for.
+    await store.put("r".repeat(width), await suspend());
+    await expect(store.put("r".repeat(width + 1), await suspend())).rejects.toThrow(/not a usable run id/);
+  });
+
   it("ignores rows in the table it did not write", async () => {
     const store = new SqlStore({
       query: async () => [{ run_id: "run-1" }, { run_id: "../escape" }, { run_id: 42 }, { run_id: null }],
