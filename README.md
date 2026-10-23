@@ -200,11 +200,15 @@ comes from whoever owns the approval and a fake that accepts `..` where the disk
 would escape its directory is how a test stops predicting the deployment.
 
 ```ts
-// CREATE TABLE agent_runs (run_id TEXT PRIMARY KEY, snapshot TEXT NOT NULL);
 const store = new SqlStore({
   query: (sql, params) => pool.query(sql, params).then((r) => r.rows),
-  dialect: "postgres",          // or "sqlite" / "mysql": the placeholder and the upsert
+  dialect: "postgres",          // or "sqlite" / "mysql": the placeholder, the upsert, the column types
 });
+
+// The table those statements read, for this store's dialect and table name.
+// Yours to run — in the migration you already have, or on the way up:
+await pool.query(store.schema());
+// CREATE TABLE IF NOT EXISTS agent_runs (run_id TEXT PRIMARY KEY, snapshot TEXT NOT NULL)
 ```
 
 `SqlStore` is the upsert, the two reads and the delete, and it stops there.
@@ -214,6 +218,14 @@ arrives by whatever migration you already run. The statements are built once,
 when the store is, because a table name cannot be a parameter and so is the one
 part of a statement that is text — a name that is really a fragment of SQL
 fails where the store was built rather than on the first run that suspends.
+`schema()` is the `CREATE TABLE` those statements need, built next to them from
+the same name and the same columns so the two cannot drift, and handed back
+rather than run. It is worth asking for instead of copying: a MySQL key no
+index will take fails where the table is made, which is obvious, but MySQL's
+`TEXT` stops at 64 KiB — which a transcript carrying its tool results passes
+long before it is a remarkable run — and that one does not fail there. It
+stores the run short, and a run stored short is one whose tools have already
+had their side effect and which there is nothing left to rebuild from.
 `put` is a single upsert rather than a read and a write, since a run that
 suspends twice is one run and two processes storing it must not interleave into
 a lost snapshot; `pending` hands back only ids this store could have written,
@@ -631,7 +643,7 @@ src/
     anthropic.ts     the only file importing @anthropic-ai/sdk
     openai-compatible.ts  the same port over POST /chat/completions, on fetch
     fake.ts          scripted provider + builders for tests
-tests/               257 tests, no network, no API key
+tests/               260 tests, no network, no API key
 ```
 
 ## SSE
@@ -673,10 +685,12 @@ ANTHROPIC_API_KEY=… node -e '…'   # or `ant auth login`; the SDK picks eithe
 
 ## What is deliberately not here
 
-- **A database.** `SqlStore` writes four statements and `query` is a function
-  you hand it, so nothing here opens a pool, depends on a driver or runs a
-  migration — and traces still go to an exporter. Which database, bucket or
-  queue either one really lands in is your call.
+- **A database.** `SqlStore` writes four statements and says which table they
+  read, and `query` is a function you hand it, so nothing here opens a pool,
+  depends on a driver or runs a migration — `schema()` is a string, and which
+  migration applies it and in what order stays yours — and traces still go to
+  an exporter. Which database, bucket or queue either one really lands in is
+  your call.
 - **A planner or a router.** `handoffTool` nests one agent inside another's
   tool call, and that is the whole of it: there is no graph, no supervisor and
   nothing that decides which agent should answer. Which agent to hand to is a

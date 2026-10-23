@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-23
+
+- The statement that makes the table: `SqlStore.schema()` hands back the `CREATE TABLE` its own four statements need, built beside them from the same table name and columns and spelled for its dialect, so a caller's migration is not transcribed out of prose — MySQL gets a key an index will take and a `LONGTEXT` snapshot rather than a `TEXT` one that stores a long run short, and the string is handed over rather than run because the pool and the migration stay the caller's.
+
 ## 2026-10-08
 
 - A SQL-backed `RunStore`: `SqlStore({ query, table, dialect })` writes an upsert, two reads and a delete over a query function the caller supplies, so a suspended run can wait in a row without this library opening a pool, depending on a driver or running a migration — held to the same contract tests as `MemoryStore` and `FileStore`, with the table name checked where the store is built because it is the one part of a statement that cannot be a parameter.
