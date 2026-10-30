@@ -4,7 +4,7 @@ export type { AgentEvent, AgentOptions, AgentResult, AgentStatus, ResumeOptions 
 export { awaitingCalls } from "./resume.js";
 export type { AwaitingCall, SuspendedRun } from "./resume.js";
 
-export { FileStore, MemoryStore, SqlStore } from "./store.js";
+export { FileStore, MAX_RUN_ID, MemoryStore, RUN_ID, SqlStore, assertRunId, parseRun, serializeRun } from "./store.js";
 export type { RunStore, SqlDialect, SqlQuery, SqlRow, SqlStoreOptions } from "./store.js";
 
 export { assertRunStore, runStoreContract } from "./store-contract.js";

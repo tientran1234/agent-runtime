@@ -52,9 +52,11 @@ const SUFFIX = ".json";
  * Checked by every store rather than only the one that builds paths: an id that
  * works against `MemoryStore` in a test has to work against the disk in a
  * deployment, and a fake that is laxer than the real thing is how that stops
- * being true.
+ * being true. Exported with the check itself, because the contract asks a
+ * store written elsewhere for the same refusal and a caller matching this
+ * pattern by eye is the one who finds out which end of it they got wrong.
  */
-const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
+export const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
 
 /**
  * How long an id the pattern above will accept, which is also how wide a
@@ -63,9 +65,9 @@ const RUN_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,199}$/;
  * narrower than the ids every store accepts is a key stored truncated, on an
  * id nobody reading the error will recognise as too long.
  */
-const MAX_RUN_ID = 200;
+export const MAX_RUN_ID = 200;
 
-function assertRunId(runId: string): void {
+export function assertRunId(runId: string): void {
   if (RUN_ID.test(runId)) return;
   throw new Error(
     `run store: ${JSON.stringify(runId)} is not a usable run id — letters, digits, dot, dash and underscore, ` +
@@ -77,9 +79,11 @@ function assertRunId(runId: string): void {
  * Serialize before anything is stored. Both implementations here go through
  * JSON rather than holding the object, which is what makes the in-memory one a
  * faithful stand-in: a snapshot that would not have survived a row fails in the
- * tests that use the fake instead of in the deployment that uses the row.
+ * tests that use the fake instead of in the deployment that uses the row. A
+ * store of the caller's own is held to that too, so this is the line it calls
+ * rather than the paragraph it reads.
  */
-function serialize(runId: string, state: SuspendedRun): string {
+export function serializeRun(runId: string, state: SuspendedRun): string {
   let json: string | undefined;
   try {
     json = JSON.stringify(state);
@@ -98,9 +102,11 @@ function serialize(runId: string, state: SuspendedRun): string {
  * understands it. `version` is in the record for a reader that may be older
  * than the writer, and here is where it has to be acted on: passed through
  * unchecked, a shape from a later release reaches the loop as a
- * half-understood object and fails somewhere that says nothing about why.
+ * half-understood object and fails somewhere that says nothing about why. The
+ * version this reader understands is this library's to move, which is the
+ * other reason a store elsewhere calls this rather than writing the check.
  */
-function parse(runId: string, json: string): SuspendedRun {
+export function parseRun(runId: string, json: string): SuspendedRun {
   let value: unknown;
   try {
     value = JSON.parse(json);
@@ -122,12 +128,12 @@ function parse(runId: string, json: string): SuspendedRun {
  * approvals do not outlive it.
  */
 export class MemoryStore implements RunStore {
-  /** Kept as JSON, not as the object: see `serialize`, and the copy `get` owes its caller. */
+  /** Kept as JSON, not as the object: see `serializeRun`, and the copy `get` owes its caller. */
   private readonly rows = new Map<string, string>();
 
   async put(runId: string, state: SuspendedRun): Promise<void> {
     assertRunId(runId);
-    this.rows.set(runId, serialize(runId, state));
+    this.rows.set(runId, serializeRun(runId, state));
   }
 
   async get(runId: string): Promise<SuspendedRun | undefined> {
@@ -137,7 +143,7 @@ export class MemoryStore implements RunStore {
     // shared object would let a caller that edits what it read edit what is
     // stored — a bug that cannot happen against a backend that returns bytes,
     // which is exactly the class of bug a fake must not hide.
-    return json === undefined ? undefined : parse(runId, json);
+    return json === undefined ? undefined : parseRun(runId, json);
   }
 
   async delete(runId: string): Promise<void> {
@@ -169,7 +175,7 @@ export class FileStore implements RunStore {
    */
   async put(runId: string, state: SuspendedRun): Promise<void> {
     assertRunId(runId);
-    const json = serialize(runId, state);
+    const json = serializeRun(runId, state);
     await mkdir(this.dir, { recursive: true });
     // Same directory, so the rename cannot cross a filesystem and fall back to
     // a copy; a random suffix, so two writers for one run do not share a
@@ -197,7 +203,7 @@ export class FileStore implements RunStore {
       if (isNotFound(err)) return undefined;
       throw err;
     }
-    return parse(runId, json);
+    return parseRun(runId, json);
   }
 
   async delete(runId: string): Promise<void> {
@@ -355,7 +361,7 @@ export class SqlStore implements RunStore {
     assertRunId(runId);
     // Serialized before the statement goes out, so a snapshot JSON cannot carry
     // has not already replaced the stored one that it could.
-    const json = serialize(runId, state);
+    const json = serializeRun(runId, state);
     await this.query(this.statements.put, [runId, json]);
   }
 
@@ -377,7 +383,7 @@ export class SqlStore implements RunStore {
           `${json === null ? "null" : typeof json}, and this store stores JSON text — declare the column as text`,
       );
     }
-    return parse(runId, json);
+    return parseRun(runId, json);
   }
 
   async delete(runId: string): Promise<void> {

@@ -10,9 +10,8 @@ import {
   SqlStore,
   callTools,
   defineTool,
-  reply,
-  resumeAgent,
   runAgent,
+  runStoreContract,
   type RunStore,
   type SqlQuery,
   type SuspendedRun,
@@ -87,78 +86,18 @@ describe.each([
   { name: "SqlStore", open: (_dir: string): RunStore => new SqlStore({ query: fakeDb().query }) },
 ])("$name as a RunStore", ({ open }) => {
   let dir: string;
-  let store: RunStore;
 
   beforeEach(async () => {
     dir = await mkdtemp(join(tmpdir(), "agent-runtime-store-"));
-    store = open(dir);
   });
   afterEach(() => rm(dir, { recursive: true, force: true }));
 
-  it("hands back a snapshot a resumed run finishes from", async () => {
-    const ran: string[] = [];
-    await store.put("run-42", await suspend(ran));
-
-    const result = await resumeAgent({
-      provider: new FakeProvider([reply("Refunded ord_42.")]),
-      tools: [refund(ran)],
-      state: (await store.get("run-42"))!,
-      decisions: { r1: { allow: true } },
-    });
-
-    expect(result).toMatchObject({ status: "completed", text: "Refunded ord_42." });
-    expect(ran).toEqual(["ord_42"]);
-  });
-
-  it("reports an id it does not hold as undefined rather than throwing", async () => {
-    expect(await store.get("never-stored")).toBeUndefined();
-  });
-
-  it("replaces a snapshot, because a run that suspends twice is one run", async () => {
-    const state = await suspend();
-    await store.put("run-42", state);
-    await store.put("run-42", { ...state, iterations: 4 });
-
-    expect((await store.get("run-42"))?.iterations).toBe(4);
-    expect(await store.pending()).toEqual(["run-42"]);
-  });
-
-  it("forgets a run, and forgetting one twice is not an error", async () => {
-    await store.put("run-42", await suspend());
-    await store.delete("run-42");
-
-    expect(await store.get("run-42")).toBeUndefined();
-    await expect(store.delete("run-42")).resolves.toBeUndefined();
-    expect(await store.pending()).toEqual([]);
-  });
-
-  it("names the runs still waiting", async () => {
-    const state = await suspend();
-    await store.put("run-1", state);
-    await store.put("run-2", state);
-
-    expect((await store.pending()).sort()).toEqual(["run-1", "run-2"]);
-  });
-
-  it("refuses a run id that is a path rather than a name", async () => {
-    const state = await suspend();
-    for (const bad of ["../escape", "runs/42", ".", "..", "", ".hidden", "a".repeat(201)]) {
-      await expect(store.put(bad, state)).rejects.toThrow(/not a usable run id/);
-      await expect(store.get(bad)).rejects.toThrow(/not a usable run id/);
-      await expect(store.delete(bad)).rejects.toThrow(/not a usable run id/);
-    }
-    expect(await store.pending()).toEqual([]);
-  });
-
-  it("refuses at put a snapshot no real backend could have stored", async () => {
-    await expect(store.put("run-42", unserializable(await suspend()))).rejects.toThrow(/is not JSON/);
-  });
-
-  it("refuses a snapshot from a writer newer than this reader", async () => {
-    const state = await suspend();
-    await store.put("run-42", { ...state, version: 2 } as unknown as SuspendedRun);
-
-    await expect(store.get("run-42")).rejects.toThrow(/run-42.*version 2/);
+  // The contract this library publishes, run against the three stores it
+  // ships. Written once and read from `runStoreContract` rather than kept here
+  // as well, because a caller holding their own store to a copy of these cases
+  // would be holding it to whichever copy stopped being edited first.
+  it.each(runStoreContract())("$name", async (storeCase) => {
+    await storeCase.run(open(dir));
   });
 });
 
