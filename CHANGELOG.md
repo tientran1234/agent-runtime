@@ -1,5 +1,9 @@
 # Changelog
 
+## 2026-10-30
+
+- The contract a store is held to, handed over: `runStoreContract()` returns the cases the three stores here pass — a name and an async function each, importing no test runner — so a caller whose suspended runs wait in their own table, bucket or queue proves theirs keeps the same promises, with `assertRunId`, `serializeRun` and `parseRun` exported beside them so passing the contract is not reimplementing it.
+
 ## 2026-10-23
 
 - The statement that makes the table: `SqlStore.schema()` hands back the `CREATE TABLE` its own four statements need, built beside them from the same table name and columns and spelled for its dialect, so a caller's migration is not transcribed out of prose — MySQL gets a key an index will take and a `LONGTEXT` snapshot rather than a `TEXT` one that stores a long run short, and the string is handed over rather than run because the pool and the migration stay the caller's.

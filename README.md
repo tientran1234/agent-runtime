@@ -232,7 +232,35 @@ a lost snapshot; `pending` hands back only ids this store could have written,
 because the table is yours and may hold rows a migration or an operator left.
 Which database that table lives in, and whether a snapshot should really land in
 a bucket or a queue instead, is still your call — the port is four methods over
-a value.
+a value. What that leaves you with is the question every port does: whether the
+four you wrote keep the promises the loop was written against. So the contract
+the three above are held to is published rather than kept in this repository's
+test file.
+
+```ts
+import { assertRunStore, runStoreContract } from "agent-runtime";
+
+// Every case, each on a store of its own, every failure at once.
+it("is a RunStore the loop can suspend into", () => assertRunStore(() => openFreshDynamoStore()));
+
+// Or one test per promise, named by your own runner.
+it.each(runStoreContract())("$name", (storeCase) => storeCase.run(openFreshDynamoStore()));
+```
+
+The cases run the real loop: each one suspends a run, stores the snapshot it
+produced and reads it back, and the first of them resumes from what came out
+and checks the refund ran once. What they hold a store to is replacing a
+snapshot rather than inserting it, answering `undefined` for an id it does not
+hold, forgetting a run twice without complaint, naming what is waiting, and
+refusing three things — an id that is a path, a snapshot JSON cannot carry
+before it replaces the stored one that could, and a snapshot from a writer
+newer than this reader. Those last three are `assertRunId`, `serializeRun` and
+`parseRun`, exported beside the stores, because a store that had to match the
+id pattern by eye or guess which snapshot versions this release understands
+would be reimplementing the contract in order to pass it. No runner is
+imported: a case is a name and an async function that throws, so vitest,
+`node:test` and jest all drive it, the same way `schema()` is a string rather
+than a migration this library runs.
 
 A suspension takes the whole turn, not the one call. Its siblings have already
 run — all of a turn's calls go out together — so their results travel in the
@@ -628,6 +656,7 @@ src/
   output.ts          the output schema: JSON Schema out, the final answer parsed back
   resume.ts          SuspendedRun: the loop's state as JSON, and the calls it is waiting on
   store.ts           RunStore: where a snapshot waits — a map, a directory, a row, or yours
+  store-contract.ts  the cases a store of your own has to pass, for your own runner
   handoff.ts         handoffTool: a nested agent behind one tool, traced under its call
   budget.ts          BudgetLedger: what a run has spent, and whether the next call fits
   memory.ts          ConversationMemory: token budget, turn-wise trimming, summariser hook
@@ -643,7 +672,7 @@ src/
     anthropic.ts     the only file importing @anthropic-ai/sdk
     openai-compatible.ts  the same port over POST /chat/completions, on fetch
     fake.ts          scripted provider + builders for tests
-tests/               260 tests, no network, no API key
+tests/               268 tests, no network, no API key
 ```
 
 ## SSE
@@ -690,7 +719,8 @@ ANTHROPIC_API_KEY=… node -e '…'   # or `ant auth login`; the SDK picks eithe
   depends on a driver or runs a migration — `schema()` is a string, and which
   migration applies it and in what order stays yours — and traces still go to
   an exporter. Which database, bucket or queue either one really lands in is
-  your call.
+  your call, and `runStoreContract()` is how a store you wrote for one proves
+  it kept the promises, in your runner rather than ours.
 - **A planner or a router.** `handoffTool` nests one agent inside another's
   tool call, and that is the whole of it: there is no graph, no supervisor and
   nothing that decides which agent should answer. Which agent to hand to is a
