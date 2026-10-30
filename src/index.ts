@@ -7,6 +7,9 @@ export type { AwaitingCall, SuspendedRun } from "./resume.js";
 export { FileStore, MemoryStore, SqlStore } from "./store.js";
 export type { RunStore, SqlDialect, SqlQuery, SqlRow, SqlStoreOptions } from "./store.js";
 
+export { assertRunStore, runStoreContract } from "./store-contract.js";
+export type { OpenRunStore, RunStoreCase } from "./store-contract.js";
+
 export { handoffTool } from "./handoff.js";
 export type { HandoffOptions } from "./handoff.js";
 
